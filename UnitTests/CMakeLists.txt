@@ -45,6 +45,8 @@ add_executable( unitTests
                      Test_Dumps.cpp 
 						   Test_Dumps_tape.cpp
 						   TestTapeRecording.cpp
+						   TestTapeFluxExact.cpp
+						   TestTapeOverdubByteExact.cpp
                      TestFDC.cpp
 						   TestSettings.cpp
                      TestZ80.cpp 
