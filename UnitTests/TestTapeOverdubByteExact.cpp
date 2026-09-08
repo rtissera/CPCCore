@@ -90,7 +90,10 @@ TEST(TapeOverdubByteExact, EntriesFarFromOverdubBurstAreUnchanged)
    ppi->tape_write_data_level_ = false;
    for (int i = 0; i < 300000; ++i)
       tape->Tick();
-   tape->StopRecord();
+   // No need to formally stop recording (CTape::StopRecord() is a
+   // separate, later API addition, not part of this fix) -- the array is
+   // already in its final post-burst state, which is all the assertions
+   // below need.
 
    unsigned int nb_after = tape->GetNbInversions();
 
