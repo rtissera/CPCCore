@@ -184,3 +184,165 @@ TEST(TapeRecording, OverdubOntoLoadedTapeDoesNotUnderflowNextEntryLength)
       << "watched entry length grew from " << before.length << " to "
       << after.length << " -- classic uint64_t underflow signature";
 }
+
+// Real end-to-end round trip, not just "the internal array survives":
+// record a known square-wave pattern onto a blank tape, export it with
+// CTape's own SaveAsCdtCSW(), load that exported file into a SEPARATE
+// fresh machine, play it back, and confirm the played-back signal
+// actually reflects what was recorded (right ballpark of transitions,
+// not silence, not garbage). Neither of the two bugs fixed above would
+// have been caught by this alone (they are about internal bookkeeping,
+// not output correctness), which is exactly why this test exists
+// separately -- "doesn't crash/corrupt" and "records the right thing"
+// are different claims.
+TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
+{
+   const char* kExportPath = "./tape_roundtrip_test.cdt";
+
+   unsigned int written_transitions = 0;
+   unsigned long long written_total_ticks = 0;
+
+   // --- Machine A: record a known pattern ---
+   {
+      DirectoriesImp dirImp;
+      CDisplay display;
+      Log log;
+      SoundFactory soundFactory;
+      ConfigurationManager conf_manager;
+      EmulatorEngine machine;
+
+      display.Init(false);
+      display.Show(false);
+
+      machine.SetDirectories(&dirImp);
+      machine.SetLog(&log);
+      machine.SetConfigurationManager(&conf_manager);
+      machine.Init(&display, &soundFactory);
+      machine.GetMem()->Initialisation();
+      machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+      machine.Reinit();
+
+      srand(0xE7123456);
+      machine.SetFixedSpeed(true);
+
+      CTape* tape = machine.GetTape();
+      PPI8255* ppi = machine.GetPPI();
+      ASSERT_NE(nullptr, tape);
+      ASSERT_NE(nullptr, ppi);
+
+      tape->InsertBlankTape(2000000); // long enough not to run out mid-test
+      tape->Rewind();
+      tape->SetMotorOn(true);
+      tape->Record();
+
+      int settle_ticks = 0;
+      while (!tape->IsRecordOn() && settle_ticks < 10000)
+      {
+         tape->Tick();
+         ++settle_ticks;
+      }
+      ASSERT_TRUE(tape->IsRecordOn());
+
+      // A plain square wave: flip every 50 ticks, 60 flips -- a real,
+      // recognizable, non-trivial signal, not one long silence.
+      const int kPeriodTicks = 50;
+      const int kFlips = 60;
+      bool level = ppi->tape_write_data_level_;
+      for (int flip = 0; flip < kFlips; ++flip)
+      {
+         level = !level;
+         ppi->tape_write_data_level_ = level;
+         ++written_transitions;
+         for (int t = 0; t < kPeriodTicks; ++t)
+            tape->Tick();
+         written_total_ticks += (unsigned long long)kPeriodTicks * 4; // this_tick_time_ is always 4 while recording
+      }
+
+      ASSERT_GT(tape->GetNbInversions(), written_transitions)
+         << "recording produced far fewer inversions than the transitions we actually wrote";
+
+      tape->SaveAsCdtCSW(kExportPath);
+   }
+
+   // The export must actually exist and look like a real CDT (TZX magic),
+   // not an empty or garbage file.
+   FILE* f = fopen(kExportPath, "rb");
+   ASSERT_NE(nullptr, f) << "SaveAsCdtCSW did not produce a file";
+   char magic[8] = {0};
+   size_t magic_read = fread(magic, 1, 7, f);
+   fseek(f, 0, SEEK_END);
+   long file_size = ftell(f);
+   fclose(f);
+   ASSERT_EQ(7u, magic_read);
+   EXPECT_STREQ("ZXTape!", magic) << "exported file does not start with the real CDT/TZX magic";
+   EXPECT_GT(file_size, 20) << "exported file is suspiciously tiny -- likely empty of real data";
+
+   // --- Machine B: reload the exported file into a completely separate
+   // machine and play it back for real ---
+   DirectoriesImp dirImp2;
+   CDisplay display2;
+   Log log2;
+   SoundFactory soundFactory2;
+   ConfigurationManager conf_manager2;
+   EmulatorEngine machine2;
+
+   display2.Init(false);
+   display2.Show(false);
+
+   machine2.SetDirectories(&dirImp2);
+   machine2.SetLog(&log2);
+   machine2.SetConfigurationManager(&conf_manager2);
+   machine2.Init(&display2, &soundFactory2);
+   machine2.GetMem()->Initialisation();
+   machine2.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine2.Reinit();
+   machine2.SetFixedSpeed(true);
+
+   machine2.LoadTape(kExportPath);
+   for (int i = 0; i < 200; ++i)
+      machine2.RunTimeSlice();
+
+   CTape* tape2 = machine2.GetTape();
+   PPI8255* ppi2 = machine2.GetPPI();
+   ASSERT_NE(nullptr, tape2);
+   ASSERT_NE(nullptr, ppi2);
+   ASSERT_GT(tape2->GetNbInversions(), 0u) << "re-exported tape did not actually load anything";
+
+   tape2->Rewind();
+   tape2->SetMotorOn(true);
+   tape2->Play();
+
+   // Sample the played-back cassette-read level every tick and count real
+   // transitions -- proves the exported file actually carries a real,
+   // varying signal, not silence or a single stuck level.
+   unsigned int replay_transitions = 0;
+   bool prev_level = (ppi2->tape_level_ != 0);
+   const int kReplayTicks = 400000; // generous -- real CSW pause/leader framing costs some
+   for (int i = 0; i < kReplayTicks; ++i)
+   {
+      tape2->Tick();
+      bool cur_level = (ppi2->tape_level_ != 0);
+      if (cur_level != prev_level)
+      {
+         ++replay_transitions;
+         prev_level = cur_level;
+      }
+   }
+
+   remove(kExportPath);
+
+   EXPECT_GT(replay_transitions, 0u)
+      << "played-back signal never changed level at all -- exported file is effectively silent";
+   // Real ballpark check, not exact equality: CSW/TZX framing (pause
+   // blocks, leader tone, rounding to 1/44100s samples) means the exact
+   // transition count will not match bit-for-bit, but it should be the
+   // same order of magnitude as what was actually written, not off by
+   // 10x/100x (which would mean the export/reload lost or fabricated most
+   // of the signal).
+   EXPECT_GT(replay_transitions, written_transitions / 4)
+      << "replayed only " << replay_transitions << " transitions vs "
+      << written_transitions << " written -- exported signal looks mostly lost";
+   EXPECT_LT(replay_transitions, written_transitions * 10)
+      << "replayed " << replay_transitions << " transitions vs only "
+      << written_transitions << " written -- exported signal looks fabricated/noisy";
+}
