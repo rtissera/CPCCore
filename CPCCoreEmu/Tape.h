@@ -110,6 +110,14 @@ public:
    bool IsTapeChanged() { return tape_changed_; }
    // RECORD
    void Record ();
+   // Real hardware has no equivalent to "stop recording, finish the tape
+   // right here" other than physically disengaging the record head --
+   // there is no data to flush or entry to close off, since Tick() already
+   // keeps the current entry's length exactly up to date on every call.
+   // Safe to call at any time, including before Record()'s deferred
+   // start_record_ has actually engaged (cleanly cancels the arm instead
+   // of ever entering record mode).
+   void StopRecord ();
    bool IsRecordOn (){ return record_; };
 
    // PLAY
