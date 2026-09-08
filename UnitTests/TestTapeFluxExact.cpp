@@ -5,19 +5,12 @@
 #include <vector>
 #include <algorithm>
 
-// Directly answers "is the WRITTEN data and the READ BACK data actually
-// binary identical" for the tape-record fixes in Tape.cpp, at the level
-// that matters: the flux array (tape_array_) the two bugs corrupt, not a
-// BASIC-level LOAD (which has its own ROM re-sync/checksum tolerance that
-// can silently mask exactly the kind of corruption Bug 2 produces -- a
-// test built on top of that would prove less, not more).
-//
-// Step 1 here is a null experiment: load a real commercial tape, export it
-// unchanged via SaveAsCdtCSW(), reload into a separate machine, and check
-// whether the flux array survives the CSW round trip exactly. This decides
-// whether "byte exact" can mean literal length/high equality per entry, or
-// whether CSW's sample-rate quantization means some tolerance is
-// unavoidable even with no bug at all.
+// Null experiment: load a real commercial tape, export it unchanged via
+// SaveAsCdtCSW(), reload into a separate machine, and check whether the
+// flux array survives the CSW round trip exactly. This decides whether
+// "byte exact" can mean literal length/high equality per entry, or
+// whether CSW's own sample-rate quantization makes that unreachable even
+// with zero bugs involved.
 static std::vector<CTape::DebugFlux> SnapshotFlux(CTape* tape)
 {
    std::vector<CTape::DebugFlux> out;
@@ -44,10 +37,7 @@ TEST(TapeFluxExact, ExportReloadOfUnmodifiedTapeIsLosslessAtFluxLevel)
       Log log;
       SoundFactory soundFactory;
       ConfigurationManager conf_manager;
-      // Heap-allocated: sizeof(EmulatorEngine) is ~5MB, matching this test
-      // suite's own convention (TestUtils.cpp/.h always use
-      // `new EmulatorEngine()`) -- a raw stack local of this size blows
-      // Windows' default 1MB thread stack immediately on function entry.
+      // Heap-allocated, not a stack local: sizeof(EmulatorEngine) is ~5MB.
       EmulatorEngine* machine = new EmulatorEngine();
 
       display.Init(false);

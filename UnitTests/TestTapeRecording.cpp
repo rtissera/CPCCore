@@ -27,11 +27,7 @@ TEST(TapeRecording, RecordOntoFreshBlankTapeDoesNotCrash)
    SoundFactory soundFactory;
    ConfigurationManager conf_manager;
    // Heap-allocated, not a stack local: sizeof(EmulatorEngine) is ~5MB,
-   // matching the rest of this test suite's own convention
-   // (TestUtils.cpp/.h always use `new EmulatorEngine()`) -- a raw stack
-   // local of this size blew Windows CI's default thread stack the moment
-   // this test started (confirmed: this is what actually crashed PR CI,
-   // not either of the two bugs this test targets).
+   // which overflows Windows' default 1MB thread stack.
    EmulatorEngine* machine = new EmulatorEngine();
 
    display.Init(false);
