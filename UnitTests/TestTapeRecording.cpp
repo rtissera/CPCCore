@@ -26,24 +26,30 @@ TEST(TapeRecording, RecordOntoFreshBlankTapeDoesNotCrash)
    Log log;
    SoundFactory soundFactory;
    ConfigurationManager conf_manager;
-   EmulatorEngine machine;
+   // Heap-allocated, not a stack local: sizeof(EmulatorEngine) is ~5MB,
+   // matching the rest of this test suite's own convention
+   // (TestUtils.cpp/.h always use `new EmulatorEngine()`) -- a raw stack
+   // local of this size blew Windows CI's default thread stack the moment
+   // this test started (confirmed: this is what actually crashed PR CI,
+   // not either of the two bugs this test targets).
+   EmulatorEngine* machine = new EmulatorEngine();
 
    display.Init(false);
    display.Show(false);
 
-   machine.SetDirectories(&dirImp);
-   machine.SetLog(&log);
-   machine.SetConfigurationManager(&conf_manager);
-   machine.Init(&display, &soundFactory);
-   machine.GetMem()->Initialisation();
-   machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-   machine.Reinit();
+   machine->SetDirectories(&dirImp);
+   machine->SetLog(&log);
+   machine->SetConfigurationManager(&conf_manager);
+   machine->Init(&display, &soundFactory);
+   machine->GetMem()->Initialisation();
+   machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine->Reinit();
 
    srand(0xE7123456);
-   machine.SetFixedSpeed(true);
+   machine->SetFixedSpeed(true);
 
-   CTape* tape = machine.GetTape();
-   PPI8255* ppi = machine.GetPPI();
+   CTape* tape = machine->GetTape();
+   PPI8255* ppi = machine->GetPPI();
    ASSERT_NE(nullptr, tape);
    ASSERT_NE(nullptr, ppi);
 
@@ -82,6 +88,7 @@ TEST(TapeRecording, RecordOntoFreshBlankTapeDoesNotCrash)
    // the crash this test targets kills the whole test binary, not just
    // this one case, so there is nothing more specific to ASSERT on.
    SUCCEED();
+   delete machine;
 }
 
 // Second, distinct bug candidate found auditing the same "start_record_"
@@ -109,31 +116,31 @@ TEST(TapeRecording, OverdubOntoLoadedTapeDoesNotUnderflowNextEntryLength)
    Log log;
    SoundFactory soundFactory;
    ConfigurationManager conf_manager;
-   EmulatorEngine machine;
+   EmulatorEngine* machine = new EmulatorEngine();
 
    display.Init(false);
    display.Show(false);
 
-   machine.SetDirectories(&dirImp);
-   machine.SetLog(&log);
-   machine.SetConfigurationManager(&conf_manager);
-   machine.Init(&display, &soundFactory);
-   machine.GetMem()->Initialisation();
-   machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-   machine.Reinit();
+   machine->SetDirectories(&dirImp);
+   machine->SetLog(&log);
+   machine->SetConfigurationManager(&conf_manager);
+   machine->Init(&display, &soundFactory);
+   machine->GetMem()->Initialisation();
+   machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine->Reinit();
 
    srand(0xE7123456);
-   machine.SetFixedSpeed(true);
+   machine->SetFixedSpeed(true);
 
    // Real commercial tape dump already used by Test_Dumps_tape.cpp -- real
    // pulse-length data, not synthetic, so the entries ahead of position 0
    // have genuine, varied lengths to overdub onto.
-   machine.LoadTape("./res/Tape/Lemmings (UK) (1991) (01. Level 01 FUN - JUST DIG!) (Version Split) [Original] [TAPE].cdt");
+   machine->LoadTape("./res/Tape/Lemmings (UK) (1991) (01. Level 01 FUN - JUST DIG!) (Version Split) [Original] [TAPE].cdt");
    for (int i = 0; i < 100; ++i)
-      machine.RunTimeSlice();
+      machine->RunTimeSlice();
 
-   CTape* tape = machine.GetTape();
-   PPI8255* ppi = machine.GetPPI();
+   CTape* tape = machine->GetTape();
+   PPI8255* ppi = machine->GetPPI();
    ASSERT_NE(nullptr, tape);
    ASSERT_NE(nullptr, ppi);
    ASSERT_GT(tape->GetNbInversions(), 10u) << "tape did not actually load, test would prove nothing";
@@ -183,6 +190,7 @@ TEST(TapeRecording, OverdubOntoLoadedTapeDoesNotUnderflowNextEntryLength)
    EXPECT_LT(after.length, before.length + 1)
       << "watched entry length grew from " << before.length << " to "
       << after.length << " -- classic uint64_t underflow signature";
+   delete machine;
 }
 
 // Real end-to-end round trip, not just "the internal array survives":
@@ -209,24 +217,24 @@ TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
       Log log;
       SoundFactory soundFactory;
       ConfigurationManager conf_manager;
-      EmulatorEngine machine;
+      EmulatorEngine* machine = new EmulatorEngine();
 
       display.Init(false);
       display.Show(false);
 
-      machine.SetDirectories(&dirImp);
-      machine.SetLog(&log);
-      machine.SetConfigurationManager(&conf_manager);
-      machine.Init(&display, &soundFactory);
-      machine.GetMem()->Initialisation();
-      machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-      machine.Reinit();
+      machine->SetDirectories(&dirImp);
+      machine->SetLog(&log);
+      machine->SetConfigurationManager(&conf_manager);
+      machine->Init(&display, &soundFactory);
+      machine->GetMem()->Initialisation();
+      machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+      machine->Reinit();
 
       srand(0xE7123456);
-      machine.SetFixedSpeed(true);
+      machine->SetFixedSpeed(true);
 
-      CTape* tape = machine.GetTape();
-      PPI8255* ppi = machine.GetPPI();
+      CTape* tape = machine->GetTape();
+      PPI8255* ppi = machine->GetPPI();
       ASSERT_NE(nullptr, tape);
       ASSERT_NE(nullptr, ppi);
 
@@ -262,6 +270,7 @@ TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
          << "recording produced far fewer inversions than the transitions we actually wrote";
 
       tape->SaveAsCdtCSW(kExportPath);
+      delete machine;
    }
 
    // The export must actually exist and look like a real CDT (TZX magic),
@@ -284,26 +293,26 @@ TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
    Log log2;
    SoundFactory soundFactory2;
    ConfigurationManager conf_manager2;
-   EmulatorEngine machine2;
+   EmulatorEngine* machine2 = new EmulatorEngine();
 
    display2.Init(false);
    display2.Show(false);
 
-   machine2.SetDirectories(&dirImp2);
-   machine2.SetLog(&log2);
-   machine2.SetConfigurationManager(&conf_manager2);
-   machine2.Init(&display2, &soundFactory2);
-   machine2.GetMem()->Initialisation();
-   machine2.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-   machine2.Reinit();
-   machine2.SetFixedSpeed(true);
+   machine2->SetDirectories(&dirImp2);
+   machine2->SetLog(&log2);
+   machine2->SetConfigurationManager(&conf_manager2);
+   machine2->Init(&display2, &soundFactory2);
+   machine2->GetMem()->Initialisation();
+   machine2->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine2->Reinit();
+   machine2->SetFixedSpeed(true);
 
-   machine2.LoadTape(kExportPath);
+   machine2->LoadTape(kExportPath);
    for (int i = 0; i < 200; ++i)
-      machine2.RunTimeSlice();
+      machine2->RunTimeSlice();
 
-   CTape* tape2 = machine2.GetTape();
-   PPI8255* ppi2 = machine2.GetPPI();
+   CTape* tape2 = machine2->GetTape();
+   PPI8255* ppi2 = machine2->GetPPI();
    ASSERT_NE(nullptr, tape2);
    ASSERT_NE(nullptr, ppi2);
    ASSERT_GT(tape2->GetNbInversions(), 0u) << "re-exported tape did not actually load anything";
@@ -345,4 +354,5 @@ TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
    EXPECT_LT(replay_transitions, written_transitions * 10)
       << "replayed " << replay_transitions << " transitions vs only "
       << written_transitions << " written -- exported signal looks fabricated/noisy";
+   delete machine2;
 }

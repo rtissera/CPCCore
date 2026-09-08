@@ -28,7 +28,15 @@ unsigned int ExtractLine(const char* buffer, int size, std::string& out)
 
    // looking for /n
    int offset = 0;
-   while (buffer[offset] != 0x0A && buffer[offset] != 0x0D && offset < size)
+   // Bounds check must run BEFORE the buffer[offset] reads (short-circuit
+   // evaluation is left-to-right) -- the original order read buffer[size]
+   // (one byte past the allocation) whenever the buffer's last byte was
+   // neither \n nor \r. Confirmed via AddressSanitizer: heap-buffer-overflow
+   // on every EmulatorEngine construction, since InitKeyboard() always hits
+   // this on the scancode file's own last line. Harmless in practice on a
+   // typical glibc heap (reads padding), fatal on Windows CI (real crash,
+   // no test output, exit code 1).
+   while (offset < size && buffer[offset] != 0x0A && buffer[offset] != 0x0D)
    {
       offset++;
    }

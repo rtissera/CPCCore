@@ -26,29 +26,33 @@ TEST(TapeOverdubByteExact, EntriesFarFromOverdubBurstAreUnchanged)
    Log log;
    SoundFactory soundFactory;
    ConfigurationManager conf_manager;
-   EmulatorEngine machine;
+   // Heap-allocated: sizeof(EmulatorEngine) is ~5MB, matching this test
+   // suite's own convention (TestUtils.cpp/.h always use
+   // `new EmulatorEngine()`) -- a raw stack local of this size blows
+   // Windows' default 1MB thread stack immediately on function entry.
+   EmulatorEngine* machine = new EmulatorEngine();
 
    display.Init(false);
    display.Show(false);
 
-   machine.SetDirectories(&dirImp);
-   machine.SetLog(&log);
-   machine.SetConfigurationManager(&conf_manager);
-   machine.Init(&display, &soundFactory);
-   machine.GetMem()->Initialisation();
-   machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-   machine.Reinit();
+   machine->SetDirectories(&dirImp);
+   machine->SetLog(&log);
+   machine->SetConfigurationManager(&conf_manager);
+   machine->Init(&display, &soundFactory);
+   machine->GetMem()->Initialisation();
+   machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine->Reinit();
 
    srand(0xE7123456);
-   machine.SetFixedSpeed(true);
-   machine.SetSpeedLimit(EmulatorEngine::E_FULL);
+   machine->SetFixedSpeed(true);
+   machine->SetSpeedLimit(EmulatorEngine::E_FULL);
 
-   machine.LoadTape("./res/Tape/Lemmings (UK) (1991) (01. Level 01 FUN - JUST DIG!) (Version Split) [Original] [TAPE].cdt");
+   machine->LoadTape("./res/Tape/Lemmings (UK) (1991) (01. Level 01 FUN - JUST DIG!) (Version Split) [Original] [TAPE].cdt");
    for (int i = 0; i < 100; ++i)
-      machine.RunTimeSlice();
+      machine->RunTimeSlice();
 
-   CTape* tape = machine.GetTape();
-   PPI8255* ppi = machine.GetPPI();
+   CTape* tape = machine->GetTape();
+   PPI8255* ppi = machine->GetPPI();
    ASSERT_NE(nullptr, tape);
    ASSERT_NE(nullptr, ppi);
    ASSERT_GT(tape->GetNbInversions(), 300u) << "tape did not actually load, test would prove nothing";
@@ -163,4 +167,5 @@ TEST(TapeOverdubByteExact, EntriesFarFromOverdubBurstAreUnchanged)
    EXPECT_GT(checked, 0u) << "no entries were actually compared -- test would prove nothing";
    fprintf(stderr, "DIAG: compared %u untouched entries (before-idx %u..%u) byte-for-byte against after-idx+delta, all must be identical to pre-overdub content\n",
       checked, untouched_start, untouched_start + checked - 1);
+   delete machine;
 }

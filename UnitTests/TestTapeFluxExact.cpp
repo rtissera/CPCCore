@@ -44,31 +44,36 @@ TEST(TapeFluxExact, ExportReloadOfUnmodifiedTapeIsLosslessAtFluxLevel)
       Log log;
       SoundFactory soundFactory;
       ConfigurationManager conf_manager;
-      EmulatorEngine machine;
+      // Heap-allocated: sizeof(EmulatorEngine) is ~5MB, matching this test
+      // suite's own convention (TestUtils.cpp/.h always use
+      // `new EmulatorEngine()`) -- a raw stack local of this size blows
+      // Windows' default 1MB thread stack immediately on function entry.
+      EmulatorEngine* machine = new EmulatorEngine();
 
       display.Init(false);
       display.Show(false);
 
-      machine.SetDirectories(&dirImp);
-      machine.SetLog(&log);
-      machine.SetConfigurationManager(&conf_manager);
-      machine.Init(&display, &soundFactory);
-      machine.GetMem()->Initialisation();
-      machine.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-      machine.Reinit();
-      machine.SetFixedSpeed(true);
-      machine.SetSpeedLimit(EmulatorEngine::E_FULL);
+      machine->SetDirectories(&dirImp);
+      machine->SetLog(&log);
+      machine->SetConfigurationManager(&conf_manager);
+      machine->Init(&display, &soundFactory);
+      machine->GetMem()->Initialisation();
+      machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+      machine->Reinit();
+      machine->SetFixedSpeed(true);
+      machine->SetSpeedLimit(EmulatorEngine::E_FULL);
 
-      machine.LoadTape(kSourceTape);
+      machine->LoadTape(kSourceTape);
       for (int i = 0; i < 100; ++i)
-         machine.RunTimeSlice();
+         machine->RunTimeSlice();
 
-      CTape* tape = machine.GetTape();
+      CTape* tape = machine->GetTape();
       ASSERT_NE(nullptr, tape);
       ASSERT_GT(tape->GetNbInversions(), 100u) << "source tape did not actually load, test would prove nothing";
 
       before = SnapshotFlux(tape);
       tape->SaveAsCdtCSW(kExportPath);
+      delete machine;
    }
 
    std::vector<CTape::DebugFlux> after;
@@ -78,28 +83,29 @@ TEST(TapeFluxExact, ExportReloadOfUnmodifiedTapeIsLosslessAtFluxLevel)
       Log log2;
       SoundFactory soundFactory2;
       ConfigurationManager conf_manager2;
-      EmulatorEngine machine2;
+      EmulatorEngine* machine2 = new EmulatorEngine();
 
       display2.Init(false);
       display2.Show(false);
 
-      machine2.SetDirectories(&dirImp2);
-      machine2.SetLog(&log2);
-      machine2.SetConfigurationManager(&conf_manager2);
-      machine2.Init(&display2, &soundFactory2);
-      machine2.GetMem()->Initialisation();
-      machine2.LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
-      machine2.Reinit();
-      machine2.SetFixedSpeed(true);
-      machine2.SetSpeedLimit(EmulatorEngine::E_FULL);
+      machine2->SetDirectories(&dirImp2);
+      machine2->SetLog(&log2);
+      machine2->SetConfigurationManager(&conf_manager2);
+      machine2->Init(&display2, &soundFactory2);
+      machine2->GetMem()->Initialisation();
+      machine2->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+      machine2->Reinit();
+      machine2->SetFixedSpeed(true);
+      machine2->SetSpeedLimit(EmulatorEngine::E_FULL);
 
-      machine2.LoadTape(kExportPath);
+      machine2->LoadTape(kExportPath);
       for (int i = 0; i < 100; ++i)
-         machine2.RunTimeSlice();
+         machine2->RunTimeSlice();
 
-      CTape* tape2 = machine2.GetTape();
+      CTape* tape2 = machine2->GetTape();
       ASSERT_NE(nullptr, tape2);
       after = SnapshotFlux(tape2);
+      delete machine2;
    }
 
    remove(kExportPath);
