@@ -43,8 +43,9 @@ add_executable( unitTests
                      TestAutorun.cpp 
                      TestContainers.cpp 
                      Test_Dumps.cpp 
-						   Test_Dumps_tape.cpp 
-                     TestFDC.cpp 
+						   Test_Dumps_tape.cpp
+						   TestTapeRecording.cpp
+                     TestFDC.cpp
 						   TestSettings.cpp
                      TestZ80.cpp 
 						   TestUtils.h
