@@ -5,7 +5,8 @@
 #define YMZ_CALL (16>>CLOCK_DIV)
 
 
-PlayCity::PlayCity(IClockable* int_line, IClockable* nmi_line, /*SoundMixer *mixer, */SoundMixer *sound_hub) : ymz294_1_(/*mixer, */YMZ294::LEFT, sound_hub), ymz294_2_(/*mixer,*/ YMZ294::RIGHT, sound_hub), trg0_(this)
+// &F884/&F984 (ymz294_1_) are the right channels, &F888/&F988 the left.
+PlayCity::PlayCity(IClockable* int_line, IClockable* nmi_line, /*SoundMixer *mixer, */SoundMixer *sound_hub) : ymz294_1_(/*mixer, */YMZ294::RIGHT, sound_hub), ymz294_2_(/*mixer,*/ YMZ294::LEFT, sound_hub), trg0_(this)
 {
    // Set the clk from ymz294's to output of CTC channel 0
    inner_line_.AddComponent(&ymz294_1_);
