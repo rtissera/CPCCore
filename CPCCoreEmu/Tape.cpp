@@ -247,7 +247,7 @@ void CTape::ClearList ()
    nb_blocks_ = 0;
 }
 
-void CTape::InsertBlankTape ()
+void CTape::InsertBlankTape (unsigned long long duration_in_ticks)
 {
    // Clean existing
    Eject ();
@@ -258,8 +258,7 @@ void CTape::InsertBlankTape ()
    tape_array_ = new FluxInversion [array_size_] ;
    memset (tape_array_ , 0, sizeof (FluxInversion ) * array_size_);
    tape_array_ [0].high = false;
-   // Duration of tape : 20" ?
-   tape_array_ [0].length = 20LL * 60LL * 4000000LL;
+   tape_array_ [0].length = duration_in_ticks;
 }
 
 #define 	M_PI   3.14159265358979323846	/* pi */
@@ -3023,24 +3022,44 @@ unsigned int CTape::Tick (/*unsigned int nbTicks*/)
             tape_array_[tape_position_].place = tape_array_[tape_position_-1].place + tape_array_[tape_position_-1].length;
          }
 
-         // Shorten now the following one.
+         // Shorten now the following one. This is the overdub/punch-in
+         // path: writing over already-recorded content (not blank media)
+         // needs to eat into whatever was there. Two real bugs found and
+         // fixed here, both confirmed empirically by
+         // UnitTests/TestTapeRecording.cpp's OverdubOntoLoadedTapeDoes
+         // NotUnderflowNextEntryLength (watched the real entry this block
+         // targets go from length 2600 to 18446744073708754220 -- textbook
+         // uint64_t wraparound -- after 200000 ticks of nothing but
+         // subtraction, before this fix):
+         // 1. `nb_tick_to_remove -= tape_array_[...].length` used to read
+         //    the length AFTER already zeroing it on the line above, so it
+         //    was always subtracting 0 -- nb_tick_to_remove never actually
+         //    shrank as entries were consumed.
+         // 2. The final subtraction always targeted the fixed index
+         //    `tape_position_+1` and re-subtracted the ORIGINAL
+         //    this_tick_time_, regardless of how many entries the loop
+         //    above had already consumed (and possibly zeroed) past it --
+         //    on a uint64_t length field, that is a real underflow into a
+         //    huge value the moment the loop advances past i==1.
          if ( tape_position_ + 1 < nb_inversions_)
          {
             unsigned long long nb_tick_to_remove = this_tick_time_;
             int i = 1;
-            while ( tape_array_[tape_position_+i].length < nb_tick_to_remove && ( tape_position_ + i < nb_inversions_) )
+            while ( ( tape_position_ + i < nb_inversions_) && tape_array_[tape_position_+i].length < nb_tick_to_remove )
             {
-               // Remove this one !
-               tape_array_[tape_position_+i].length = 0;
-               // Reduce nb ticks
+               // Remove this one -- consume its length from the removal
+               // budget BEFORE zeroing it, not after.
                nb_tick_to_remove -= tape_array_[tape_position_+i].length;
+               tape_array_[tape_position_+i].length = 0;
                ++i;
 
             }
-            // Last one exists ?
-            if ( tape_position_ + 1 < nb_inversions_)
+            // Last one exists ? Apply whatever removal budget is left to
+            // the entry the loop actually stopped on, not a hardcoded
+            // tape_position_+1.
+            if ( tape_position_ + i < nb_inversions_)
             {
-               tape_array_[tape_position_+1].length -= this_tick_time_;
+               tape_array_[tape_position_+i].length -= nb_tick_to_remove;
             }
          }
 
@@ -3163,7 +3182,15 @@ unsigned int CTape::Tick (/*unsigned int nbTicks*/)
                tape_array_[tape_position_+1].block_number = 0;
                tape_array_[tape_position_+1].block_type = 0;
                tape_array_[tape_position_+1].length = remaining_reversal_flux_;
-               tape_array_[tape_position_+1].place = tape_array_[tape_position_-1].place +tape_array_[tape_position_-1].length;
+               // Unlike the sibling branch above, tape_position_ is NOT
+               // incremented in this one -- the new entry continues the
+               // CURRENT one (tape_position_), not the one before it.
+               // tape_array_[tape_position_-1] here was a real
+               // unsigned-underflow bug (reads tape_array_[0xFFFFFFFF])
+               // whenever recording starts at tape_position_ == 0, i.e.
+               // right at the start of a fresh/rewound tape -- reliably
+               // reproduced by UnitTests/TestTapeRecording.cpp.
+               tape_array_[tape_position_+1].place = tape_array_[tape_position_].place + tape_array_[tape_position_].length;
 
             }
          }

@@ -133,8 +133,10 @@ public:
    void Pause ();
    bool IsPauseOn (){ return false; };
 
-   // Insert new tape
-   void InsertBlankTape ();
+   // Insert new tape. Default duration matches a real C15-style 20 minute
+   // blank tape; a shorter one is useful for tests that need the initial
+   // silent span to run out quickly.
+   void InsertBlankTape (unsigned long long duration_in_ticks = 20LL * 60LL * 4000000LL);
 
    int CompareToTape(CTape* other_tape);
    int InsertTape(unsigned char * buffer, unsigned int size);

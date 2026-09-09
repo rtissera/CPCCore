@@ -43,8 +43,11 @@ add_executable( unitTests
                      TestAutorun.cpp 
                      TestContainers.cpp 
                      Test_Dumps.cpp 
-						   Test_Dumps_tape.cpp 
-                     TestFDC.cpp 
+						   Test_Dumps_tape.cpp
+						   TestTapeRecording.cpp
+						   TestTapeFluxExact.cpp
+						   TestTapeOverdubByteExact.cpp
+                     TestFDC.cpp
 						   TestSettings.cpp
                      TestZ80.cpp 
 						   TestUtils.h
@@ -65,7 +68,7 @@ IF(MSVC)
 ENDIF(MSVC)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} --std=c++17)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++17")
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(LIBZA libz.a)
     elseif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9.0")
