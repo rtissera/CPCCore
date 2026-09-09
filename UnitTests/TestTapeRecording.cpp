@@ -352,3 +352,97 @@ TEST(TapeRecording, RecordedTapeReloadsAndReplaysTheWrittenSignal)
       << written_transitions << " written -- exported signal looks fabricated/noisy";
    delete machine2;
 }
+
+// Record() had no counterpart, so a caller could arm recording but never end
+// it. Two behaviours to prove: stopping mid-recording really does stop new
+// inversions being appended, and stopping before the deferred start_record_
+// has engaged cancels the arm instead of recording anyway.
+TEST(TapeRecording, StopRecordActuallyStopsRecording)
+{
+   DirectoriesImp dirImp;
+   CDisplay display;
+   Log log;
+   SoundFactory soundFactory;
+   ConfigurationManager conf_manager;
+   EmulatorEngine* machine = new EmulatorEngine();
+
+   display.Init(false);
+   display.Show(false);
+
+   machine->SetDirectories(&dirImp);
+   machine->SetLog(&log);
+   machine->SetConfigurationManager(&conf_manager);
+   machine->Init(&display, &soundFactory);
+   machine->GetMem()->Initialisation();
+   machine->LoadConfiguration("./TestConf.ini", "./TestConf_0.ini");
+   machine->Reinit();
+
+   srand(0xE7123456);
+   machine->SetFixedSpeed(true);
+
+   CTape* tape = machine->GetTape();
+   PPI8255* ppi = machine->GetPPI();
+   ASSERT_NE(nullptr, tape);
+   ASSERT_NE(nullptr, ppi);
+
+   // --- Case 1: stop mid-recording ---
+   tape->InsertBlankTape(2000000);
+   tape->Rewind();
+   tape->SetMotorOn(true);
+   tape->Record();
+
+   int settle_ticks = 0;
+   while (!tape->IsRecordOn() && settle_ticks < 10000)
+   {
+      tape->Tick();
+      ++settle_ticks;
+   }
+   ASSERT_TRUE(tape->IsRecordOn());
+
+   bool level = ppi->tape_write_data_level_;
+   for (int i = 0; i < 500; ++i)
+   {
+      level = !level;
+      ppi->tape_write_data_level_ = level;
+      for (int t = 0; t < 20; ++t)
+         tape->Tick();
+   }
+   ASSERT_TRUE(tape->IsRecordOn());
+   unsigned int nb_inversions_before_stop = tape->GetNbInversions();
+
+   tape->StopRecord();
+   EXPECT_FALSE(tape->IsRecordOn());
+
+   // Keep toggling the write line and ticking exactly as before -- if
+   // StopRecord() actually disengaged the record head, none of this
+   // should create new inversions any more.
+   for (int i = 0; i < 500; ++i)
+   {
+      level = !level;
+      ppi->tape_write_data_level_ = level;
+      for (int t = 0; t < 20; ++t)
+         tape->Tick();
+   }
+   EXPECT_EQ(nb_inversions_before_stop, tape->GetNbInversions())
+      << "tape kept recording new inversions after StopRecord()";
+
+   // --- Case 2: cancel before the deferred start ever engages ---
+   // (InsertBlankTape() itself calls Eject() first, resetting position/
+   // record state cleanly.)
+   tape->InsertBlankTape(2000000);
+   tape->Rewind();
+   tape->SetMotorOn(true);
+   tape->Record();
+   tape->StopRecord(); // cancel before any Tick() has processed start_record_
+   EXPECT_FALSE(tape->IsRecordOn());
+
+   settle_ticks = 0;
+   while (settle_ticks < 10000)
+   {
+      tape->Tick();
+      ++settle_ticks;
+   }
+   EXPECT_FALSE(tape->IsRecordOn())
+      << "StopRecord() before the deferred start engaged did not cancel it -- recording started anyway";
+   delete machine;
+}
