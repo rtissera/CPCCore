@@ -22,6 +22,14 @@ PlayCity::PlayCity(IClockable* int_line, IClockable* nmi_line, /*SoundMixer *mix
    // Channel 3 => ctrl_int
    z84c30_.Init(Z84C30::CHANNEL_3, int_line, nullptr);
    drop_next_tick_ = false;
+   trg0_update_ = false;
+   // Tick() decrements this before testing it against 0, so leaving it
+   // uninitialised here is fatal rather than merely untidy: starting from 0 it
+   // goes straight to -1 and can never come back, and the two YMZ294s are then
+   // never clocked at all -- PlayCity stays completely silent for the whole
+   // session. Reset() sets it too, but Reset() only runs for expansions that
+   // were already plugged in, so a board attached later never got it.
+   next_call_ymz_ = YMZ_CALL;
 }
 
 
