@@ -3241,6 +3241,12 @@ void CTape::Record ()
    start_record_ = true;
 }
 
+void CTape::StopRecord ()
+{
+   start_record_ = false;
+   record_ = false;
+}
+
 void CTape::Play ()
 {
    play_ = true;

@@ -110,6 +110,10 @@ public:
    bool IsTapeChanged() { return tape_changed_; }
    // RECORD
    void Record ();
+   // Nothing to flush: Tick() keeps the current entry's length up to date on
+   // every call. Safe before Record()'s deferred start has engaged, which
+   // cancels the arm rather than entering record mode.
+   void StopRecord ();
    bool IsRecordOn (){ return record_; };
 
    // PLAY
