@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Snapshot.h"
 #include "Motherboard.h"
+#include "MachineSettings.h"
 #include <stdio.h>
 
 extern unsigned int ListeColorsIndex[0x100];
@@ -410,15 +411,21 @@ void CSnapshot::LoadStdSna ( unsigned char * header, const unsigned char* buffer
    }
    else if (snaType > 2)
    {
-      // CPC Type : To do ?
+      // CPC Type
       switch (header[0x6D])
       {
-      case 0:/*machine_->SetMachineType(0); */machine_->SetPlus(false); break;  // 464
-      case 1:/*machine_->SetMachineType(1); */machine_->SetPlus(false); break;  // 664
-      case 2:/*machine_->SetMachineType(2); */machine_->SetPlus(false); break;  // 6128
-      case 4:/*machine_->SetMachineType(4); */machine_->SetPlus(true); break;  // 6128+
-      case 5:/*machine_->SetMachineType(3); */machine_->SetPlus(true); break;  // 464+
-      case 6:/*machine_->SetMachineType(5); */machine_->SetPlus(true); break;  // GX400
+      case 0:machine_->SetMachineType(MachineSettings::OLD_464);  machine_->SetPlus(false); break;
+      case 1:machine_->SetMachineType(MachineSettings::OLD_664);  machine_->SetPlus(false); break;
+      case 2:machine_->SetMachineType(MachineSettings::OLD_6128); machine_->SetPlus(false); break;
+      // The format defines 3 as "unknown", but every other implementation that
+      // reads this byte treats it as a Plus: it is what Caprice32 writes for its
+      // own Plus model, Arnold's version 3 switch falls through to 6128 Plus,
+      // and CPCEC clamps anything above 3 onto its Plus type. A version 3 image
+      // carrying 3 is a mislabelled Plus snapshot in practice, so follow them.
+      case 3:machine_->SetMachineType(MachineSettings::PLUS_6128);machine_->SetPlus(true); break;
+      case 4:machine_->SetMachineType(MachineSettings::PLUS_6128);machine_->SetPlus(true); break;
+      case 5:machine_->SetMachineType(MachineSettings::PLUS_464); machine_->SetPlus(true); break;
+      case 6:machine_->SetMachineType(MachineSettings::GX400);    machine_->SetPlus(true); break;
       }
 
 
@@ -1422,19 +1429,18 @@ void CSnapshot::WriteSnapshotV3 ( std::vector<unsigned char>& out, unsigned char
       header[0x5B+i] = machine_->GetPSG()->register_[i];
    }
 
-   // CPC Type : To do (6128)?
-#if 0
+   // CPC Type. MachineSettings::HardwareType on the left, the values the
+   // format defines on the right -- the two orders differ for the Plus range.
    switch ( machine_->GetMachineType())
    {
-   case 0:header[0x6D] = 0; break;  // 464
-   case 1:header[0x6D] = 1; break;  // 664
-   case 2:header[0x6D] = 2; break;  // 6128
-   case 3:header[0x6D] = 5; break;  // 464+
-   case 4:header[0x6D] = 4; break;  // 6128+
+   case MachineSettings::OLD_464:  header[0x6D] = 0; break;
+   case MachineSettings::OLD_664:  header[0x6D] = 1; break;
+   case MachineSettings::OLD_6128: header[0x6D] = 2; break;
+   case MachineSettings::PLUS_464: header[0x6D] = 5; break;
+   case MachineSettings::PLUS_6128:header[0x6D] = 4; break;
+   case MachineSettings::GX400:    header[0x6D] = 6; break;
+   default:                        header[0x6D] = 2; break;
    }
-#else
-   header[0x6D] = 2;
-#endif
 
 
    // MemEnable - Bit 7 set if used. Bit 0 = Bank C4..C7, Bit 1 = Banks C4..DF
