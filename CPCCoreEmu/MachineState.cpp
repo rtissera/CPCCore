@@ -1,0 +1,801 @@
+#include "stdafx.h"
+#include "MachineState.h"
+#include "Machine.h"
+#include "Motherboard.h"
+#include "DiskGen.h"
+#include "IDisk.h"
+
+#include <cstring>
+
+namespace
+{
+
+const unsigned char kMagic[4] = { 'S', 'B', 'X', 'S' };
+const size_t kHeaderSize = 12;
+
+// Scheduler: the cycle debt each component carries across a time slice, which
+// is what a .SNA has no room for and what makes a restored machine drift.
+const unsigned int kChunkScheduler = 0x53434844;  // "SCHD"
+
+// The CPU's execution engine: where it is inside the current instruction, and
+// the latches it carries between machine cycles. A .SNA only records the
+// registers an instruction boundary can see.
+const unsigned int kChunkZ80 = 0x5A383058;  // "Z80X"
+
+// The gate array's own counters. The .SNA has fields for the interrupt counter
+// and the vsync delay, but none for the hsync counter that drives them, so a
+// restored machine raises its next interrupt at a different moment.
+const unsigned int kChunkGateArray = 0x47415258;  // "GARX"
+
+// The sound chip's derived state. A .SNA carries the sixteen registers and the
+// load side replays them through the bus, which rebuilds most of this -- but
+// replaying r13 restarts the envelope and replaying r14 clears the flag that
+// selects the keyboard rather than the latch, so the machine reads different
+// keys after a restore and takes a different path.
+const unsigned int kChunkPsg = 0x50534758;  // "PSGX"
+
+// The disk controller: the command in flight with its parameters and results,
+// the head position, and the MFM decoder's place in the track. A .SNA has room
+// for the motor flag and the current track and nothing else, which describes a
+// stopped drive and no more.
+//
+// scan_func_, disk_to_load_ and delayed_load_filepath_ are deliberately left
+// out. The first is a function pointer and the others belong to the deferred
+// disk-load request rather than to the controller, and writing a host address
+// into a state that another process will read back is a bug, not an omission.
+const unsigned int kChunkFdc = 0x46444358;  // "FDCX"
+
+// The drives: where each head is, not what is under it.
+//
+// A disk image is media, not machine state. It can be hundreds of kilobytes,
+// it is the same before and after, and the user may legitimately have swapped
+// it. So this carries the position -- track, side, rotational angle, and the
+// MFM decoder's place in the bit stream -- and refuses to load if the geometry
+// of the disk now in the drive does not match the one the state was taken with.
+// Restoring a head position into a different disk would seek into nothing.
+const unsigned int kChunkDrives = 0x44525653;  // "DRVS"
+
+void PutU16(std::vector<unsigned char>& out, unsigned short v)
+{
+   out.push_back(v & 0xFF);
+   out.push_back((v >> 8) & 0xFF);
+}
+
+void PutU32(std::vector<unsigned char>& out, unsigned int v)
+{
+   out.push_back(v & 0xFF);
+   out.push_back((v >> 8) & 0xFF);
+   out.push_back((v >> 16) & 0xFF);
+   out.push_back((v >> 24) & 0xFF);
+}
+
+unsigned short GetU16(const unsigned char* p) { return p[0] | (p[1] << 8); }
+
+unsigned int GetU32(const unsigned char* p)
+{
+   return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+}  // namespace
+
+void MachineState::WriteScheduler(Motherboard* board, std::vector<unsigned char>& out)
+{
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkScheduler);
+   PutU32(out, 0);                       // patched once the payload is known
+
+   const size_t payload_at = out.size();
+
+   PutU32(out, board->counter_);
+   PutU32(out, (unsigned int)board->nb_components_);
+
+   const int nb_elapsed = (int)(sizeof(board->component_elapsed_time_)
+                              / sizeof(board->component_elapsed_time_[0]));
+   PutU32(out, (unsigned int)nb_elapsed);
+   for (int i = 0; i < nb_elapsed; ++i)
+      PutU32(out, board->component_elapsed_time_[i]);
+
+   // Each component keeps its own copy of where it is within the slice.
+   for (int i = 0; i < board->nb_components_; ++i)
+   {
+      IComponent* c = board->component_list_[i];
+      PutU32(out, c ? (unsigned int)c->elapsed_time_ : 0);
+      PutU32(out, c ? (unsigned int)c->this_tick_time_ : 0);
+   }
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadScheduler(Motherboard* board, const unsigned char* p, size_t size)
+{
+   if (size < 12) return false;
+   size_t at = 0;
+
+   board->counter_ = GetU32(&p[at]); at += 4;
+
+   const int nb_components = (int)GetU32(&p[at]); at += 4;
+   const int nb_elapsed = (int)GetU32(&p[at]); at += 4;
+
+   const int capacity_elapsed = (int)(sizeof(board->component_elapsed_time_)
+                                    / sizeof(board->component_elapsed_time_[0]));
+   const int capacity_components = (int)(sizeof(board->component_list_)
+                                       / sizeof(board->component_list_[0]));
+   if (nb_elapsed != capacity_elapsed) return false;
+   if (nb_components < 0 || nb_components > capacity_components) return false;
+   if (size < at + (size_t)nb_elapsed * 4 + (size_t)nb_components * 8) return false;
+
+   // nb_components_ itself is set by InitStartOptimized() from the machine's
+   // configuration, not by the state: a state must not be able to describe a
+   // component list that does not match the machine it is loaded into.
+   if (nb_components != board->nb_components_) return false;
+
+   for (int i = 0; i < nb_elapsed; ++i)
+   {
+      board->component_elapsed_time_[i] = GetU32(&p[at]); at += 4;
+   }
+
+   for (int i = 0; i < nb_components; ++i)
+   {
+      IComponent* c = board->component_list_[i];
+      const unsigned int elapsed = GetU32(&p[at]); at += 4;
+      const unsigned int tick = GetU32(&p[at]); at += 4;
+      if (c)
+      {
+         c->elapsed_time_ = (int)elapsed;
+         c->this_tick_time_ = (int)tick;
+      }
+   }
+
+   return true;
+}
+
+void MachineState::WriteZ80(Motherboard* board, std::vector<unsigned char>& out)
+{
+   Z80* z80 = board->GetProc();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkZ80);
+   PutU32(out, 0);                       // patched once the payload is known
+   const size_t payload_at = out.size();
+
+   PutU32(out, z80->current_opcode_);
+   PutU32(out, (unsigned int)z80->t_);
+   PutU32(out, (unsigned int)z80->machine_cycle_);
+   PutU32(out, z80->counter_);
+   PutU32(out, z80->read_count_);
+   PutU16(out, z80->address_);
+   PutU16(out, z80->current_address_);
+   PutU16(out, z80->current_data_);
+   PutU16(out, z80->mem_ptr_.w);
+   out.push_back(z80->data_);
+   out.push_back(z80->q_);
+   out.push_back(z80->new_instruction_ ? 1 : 0);
+   out.push_back(z80->rw_opcode_ ? 1 : 0);
+   out.push_back(z80->carry_set_ ? 1 : 0);
+   out.push_back(z80->break_ ? 1 : 0);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadZ80(Motherboard* board, const unsigned char* p, size_t size)
+{
+   if (size < 34) return false;
+   Z80* z80 = board->GetProc();
+   size_t at = 0;
+
+   // current_function_ and next_function_ are pointers into the CPU's own
+   // dispatch tables, so they cannot be written to a buffer and read back in
+   // another process. They do not have to be: a state is only ever taken on an
+   // instruction boundary, where the pending function is always the fetch, so
+   // put the CPU back in that canonical state and let the fields below say
+   // where inside the fetch it was. pc_ has already been restored from the
+   // .SNA at this point, so this preserves it.
+   z80->PrepareForFetch(z80->pc_);
+
+   z80->current_opcode_ = GetU32(&p[at]); at += 4;
+   z80->t_ = (int)GetU32(&p[at]); at += 4;
+   z80->machine_cycle_ = (Z80::MachineCycle)GetU32(&p[at]); at += 4;
+   z80->counter_ = GetU32(&p[at]); at += 4;
+   z80->read_count_ = GetU32(&p[at]); at += 4;
+   z80->address_ = GetU16(&p[at]); at += 2;
+   z80->current_address_ = GetU16(&p[at]); at += 2;
+   z80->current_data_ = GetU16(&p[at]); at += 2;
+   z80->mem_ptr_.w = GetU16(&p[at]); at += 2;
+   z80->data_ = p[at++];
+   z80->q_ = p[at++];
+   z80->new_instruction_ = p[at++] != 0;
+   z80->rw_opcode_ = p[at++] != 0;
+   z80->carry_set_ = p[at++] != 0;
+   z80->break_ = p[at++] != 0;
+
+   return true;
+}
+
+void MachineState::WriteGateArray(Motherboard* board, std::vector<unsigned char>& out)
+{
+   GateArray* ga = board->GetVGA();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkGateArray);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   out.push_back(ga->hsync_counter_);
+   out.push_back(ga->vsync_counter_);
+   out.push_back(ga->interrupt_counter_);
+   out.push_back(ga->wait_for_hsync_);
+   out.push_back(ga->interrupt_raised_ ? 1 : 0);
+   out.push_back(ga->hsync_ ? 1 : 0);
+   out.push_back(ga->vsync_ ? 1 : 0);
+   out.push_back(ga->h_old_sync_ ? 1 : 0);
+   out.push_back(ga->v_old_sync_ ? 1 : 0);
+   // A palette write can be pending when the state is taken.
+   out.push_back(ga->buffered_ink_available_ ? 1 : 0);
+   PutU32(out, ga->buffered_ink_);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadGateArray(Motherboard* board, const unsigned char* p, size_t size)
+{
+   if (size < 14) return false;
+   GateArray* ga = board->GetVGA();
+   size_t at = 0;
+
+   ga->hsync_counter_ = p[at++];
+   ga->vsync_counter_ = p[at++];
+   ga->interrupt_counter_ = p[at++];
+   ga->wait_for_hsync_ = p[at++];
+   ga->interrupt_raised_ = p[at++] != 0;
+   ga->hsync_ = p[at++] != 0;
+   ga->vsync_ = p[at++] != 0;
+   ga->h_old_sync_ = p[at++] != 0;
+   ga->v_old_sync_ = p[at++] != 0;
+   ga->buffered_ink_available_ = p[at++] != 0;
+   ga->buffered_ink_ = GetU32(&p[at]); at += 4;
+
+   return true;
+}
+
+void MachineState::WritePsg(Motherboard* board, std::vector<unsigned char>& out)
+{
+   Ay8912* psg = board->GetPSG();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkPsg);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   out.insert(out.end(), psg->register_, psg->register_ + 16);
+   out.push_back(psg->register_address_);
+
+   PutU32(out, psg->channel_a_freq_);   PutU32(out, psg->channel_a_freq_counter_);
+   PutU32(out, psg->channel_b_freq_);   PutU32(out, psg->channel_b_freq_counter_);
+   PutU32(out, psg->channel_c_freq_);   PutU32(out, psg->channel_c_freq_counter_);
+   PutU32(out, psg->noise_frequency_);
+
+   out.push_back(psg->mixer_control_register_);
+   out.push_back(psg->channel_a_volume_);
+   out.push_back(psg->channel_b_volume_);
+   out.push_back(psg->channel_c_volume_);
+   out.push_back(psg->enveloppe_volume_);
+   PutU32(out, psg->volume_enveloppe_frequency_);
+   out.push_back(psg->volume_enveloppe_shape_);
+   out.push_back(psg->external_data_register_b_);
+   out.push_back(psg->enveloppe_up_ ? 1 : 0);
+   out.push_back(psg->enveloppe_stop_ ? 1 : 0);
+   out.push_back(psg->register_replaced_ ? 1 : 0);
+   out.push_back(psg->register_14_);
+
+   PutU32(out, psg->counter_a_);
+   PutU32(out, psg->counter_b_);
+   PutU32(out, psg->counter_c_);
+   PutU32(out, psg->counter_noise_);
+   PutU32(out, psg->counter_env_);
+   PutU32(out, psg->counter_state_env_);
+   out.push_back(psg->chan_a_high_);
+   out.push_back(psg->chan_b_high_);
+   out.push_back(psg->chan_c_high_);
+   out.push_back(psg->chan_noise_high_);
+   PutU32(out, psg->noise_shift_register_);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadPsg(Motherboard* board, const unsigned char* p, size_t size)
+{
+   if (size < 85) return false;
+   Ay8912* psg = board->GetPSG();
+   size_t at = 0;
+
+   memcpy(psg->register_, &p[at], 16); at += 16;
+   psg->register_address_ = p[at++];
+
+   psg->channel_a_freq_ = GetU32(&p[at]); at += 4;
+   psg->channel_a_freq_counter_ = GetU32(&p[at]); at += 4;
+   psg->channel_b_freq_ = GetU32(&p[at]); at += 4;
+   psg->channel_b_freq_counter_ = GetU32(&p[at]); at += 4;
+   psg->channel_c_freq_ = GetU32(&p[at]); at += 4;
+   psg->channel_c_freq_counter_ = GetU32(&p[at]); at += 4;
+   psg->noise_frequency_ = GetU32(&p[at]); at += 4;
+
+   psg->mixer_control_register_ = p[at++];
+   psg->channel_a_volume_ = p[at++];
+   psg->channel_b_volume_ = p[at++];
+   psg->channel_c_volume_ = p[at++];
+   psg->enveloppe_volume_ = p[at++];
+   psg->volume_enveloppe_frequency_ = GetU32(&p[at]); at += 4;
+   psg->volume_enveloppe_shape_ = p[at++];
+   psg->external_data_register_b_ = p[at++];
+   psg->enveloppe_up_ = p[at++] != 0;
+   psg->enveloppe_stop_ = p[at++] != 0;
+   psg->register_replaced_ = p[at++] != 0;
+   psg->register_14_ = p[at++];
+
+   psg->counter_a_ = GetU32(&p[at]); at += 4;
+   psg->counter_b_ = GetU32(&p[at]); at += 4;
+   psg->counter_c_ = GetU32(&p[at]); at += 4;
+   psg->counter_noise_ = GetU32(&p[at]); at += 4;
+   psg->counter_env_ = GetU32(&p[at]); at += 4;
+   psg->counter_state_env_ = GetU32(&p[at]); at += 4;
+   psg->chan_a_high_ = p[at++];
+   psg->chan_b_high_ = p[at++];
+   psg->chan_c_high_ = p[at++];
+   psg->chan_noise_high_ = p[at++];
+   psg->noise_shift_register_ = GetU32(&p[at]); at += 4;
+
+   return true;
+}
+
+void MachineState::WriteFdc(Motherboard* board, std::vector<unsigned char>& out)
+{
+   FDC* f = board->GetFDC();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkFdc);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   PutU32(out, (unsigned int)f->state_);
+   out.push_back(f->instruction_);
+   out.push_back(f->mt_ ? 1 : 0);
+   out.push_back(f->mf_ ? 1 : 0);
+   out.push_back(f->sk_ ? 1 : 0);
+   out.push_back(f->motor_on_ ? 1 : 0);
+   out.push_back(f->first_sector_found_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->sector_count_);
+   PutU32(out, (unsigned int)f->nb_data_in_buffer_);
+   PutU32(out, (unsigned int)f->nb_data_offset_);
+   out.insert(out.end(), f->data_buffer_, f->data_buffer_ + 1);
+   out.push_back(f->recalibrate_ ? 1 : 0);
+   out.insert(out.end(), f->parameters_, f->parameters_ + 9);
+   out.insert(out.end(), f->results_, f->results_ + 7);
+   out.push_back(f->parameters_count_);
+   out.push_back(f->results_count_);
+   PutU32(out, (unsigned int)f->index_fdc_command_);
+   PutU32(out, (unsigned int)f->step_rate_);
+   out.push_back(f->track_seeded_);
+   out.push_back(f->step_count_);
+   PutU32(out, (unsigned int)f->move_size_);
+   out.push_back(f->dma_disable_ ? 1 : 0);
+   out.push_back(f->ma_ ? 1 : 0);
+   out.push_back(f->nw_ ? 1 : 0);
+   out.push_back(f->nd_ ? 1 : 0);
+   out.push_back(f->or_ ? 1 : 0);
+   out.push_back(f->de_ ? 1 : 0);
+   out.push_back(f->en_ ? 1 : 0);
+   out.push_back(f->status_0_);
+   out.push_back(f->status_1_);
+   out.push_back(f->status_2_);
+   out.push_back(f->status_3_);
+   out.push_back(f->hu_);
+   out.push_back(f->tp_);
+   out.push_back(f->tr_);
+   out.push_back(f->hd_);
+   out.push_back(f->sc_);
+   out.push_back(f->init_r_);
+   out.push_back(f->sz_);
+   out.push_back(f->ls_);
+   out.push_back(f->gp_);
+   out.push_back(f->sl_);
+   out.push_back(f->fb_);
+   out.push_back(f->nm_);
+   out.push_back(f->seek_cmd_ ? 1 : 0);
+   out.push_back(f->interrupt_code_);
+   out.push_back(f->seek_end_ ? 1 : 0);
+   out.push_back(f->force_nd_ ? 1 : 0);
+   out.push_back(f->last_interrupt_result_);
+   out.push_back(f->interrupt_occured_ ? 1 : 0);
+   out.push_back(f->ready_line_changed_ ? 1 : 0);
+   out.push_back(f->busy_);
+   out.push_back(f->main_status_);
+   out.push_back(f->data_register_);
+   out.push_back(f->cb_ ? 1 : 0);
+   out.push_back(f->rqm_ ? 1 : 0);
+   out.push_back(f->dio_ ? 1 : 0);
+   out.push_back(f->exm_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->delay_for_instruction_);
+   PutU32(out, (unsigned int)(f->time_ & 0xFFFFFFFFu)); PutU32(out, (unsigned int)(f->time_ >> 32));
+   PutU32(out, (unsigned int)(f->time_for_bad_instruction_ & 0xFFFFFFFFu)); PutU32(out, (unsigned int)(f->time_for_bad_instruction_ >> 32));
+   out.push_back(f->rw_command_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->cnt_exec_);
+   PutU32(out, (unsigned int)f->old_state_);
+   PutU32(out, (unsigned int)f->current_command_);
+   PutU32(out, (unsigned int)f->index_hole_encountered_);
+   out.push_back(f->read_deleted_ ? 1 : 0);
+   out.push_back(f->write_deleted_ ? 1 : 0);
+   out.push_back(f->tc_ ? 1 : 0);
+   PutU16(out, (unsigned short)f->read_crc_);
+   out.push_back(f->seek_track_ ? 1 : 0);
+   out.push_back(f->stp_);
+   PutU32(out, (unsigned int)f->format_phase_);
+   PutU32(out, (unsigned int)f->format_sector_count_);
+   PutU32(out, (unsigned int)f->seek_count_);
+   out.insert(out.end(), f->sc_array_, f->sc_array_ + 2);
+   PutU32(out, (unsigned int)f->current_drive_);
+   PutU32(out, (unsigned int)f->current_command_phase_);
+   out.push_back(f->previous_bit_);
+   out.push_back(f->sync_count_);
+   out.push_back(f->current_data_byte_);
+   out.push_back(f->bit_count_);
+   PutU32(out, (unsigned int)f->out_index_);
+   PutU32(out, (unsigned int)f->data_to_read_);
+   PutU32(out, (unsigned int)f->data_to_return_);
+   out.push_back(f->first_non_0_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->read_sector_state_);
+   out.push_back(f->read_track_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->write_byte_counter_);
+   out.push_back(f->byte_to_write_);
+   out.push_back(f->byte_is_sync_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->next_phase_);
+   out.push_back(f->crc_on_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->chrn_byte_count_);
+   PutU32(out, (unsigned int)f->crc_cyte_);
+   out.push_back(f->delayed_load_ ? 1 : 0);
+   PutU32(out, (unsigned int)f->delayed_load_count_);
+   PutU32(out, (unsigned int)f->delayed_load_drive_);
+   out.push_back(f->delayed_load_container_ ? 1 : 0);
+   out.push_back(f->on_index_ ? 1 : 0);
+   out.push_back(f->read_data_done_ ? 1 : 0);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadFdc(Motherboard* board, const unsigned char* p, size_t size)
+{
+   FDC* f = board->GetFDC();
+   size_t at = 0;
+
+   f->state_ = (FDC::Phase)GetU32(&p[at]); at += 4;
+   f->instruction_ = p[at++];
+   f->mt_ = p[at++] != 0;
+   f->mf_ = p[at++] != 0;
+   f->sk_ = p[at++] != 0;
+   f->motor_on_ = p[at++] != 0;
+   f->first_sector_found_ = p[at++] != 0;
+   f->sector_count_ = GetU32(&p[at]); at += 4;
+   f->nb_data_in_buffer_ = GetU32(&p[at]); at += 4;
+   f->nb_data_offset_ = GetU32(&p[at]); at += 4;
+   memcpy(f->data_buffer_, &p[at], 1); at += 1;
+   f->recalibrate_ = p[at++] != 0;
+   memcpy(f->parameters_, &p[at], 9); at += 9;
+   memcpy(f->results_, &p[at], 7); at += 7;
+   f->parameters_count_ = p[at++];
+   f->results_count_ = p[at++];
+   f->index_fdc_command_ = GetU32(&p[at]); at += 4;
+   f->step_rate_ = GetU32(&p[at]); at += 4;
+   f->track_seeded_ = p[at++];
+   f->step_count_ = p[at++];
+   f->move_size_ = GetU32(&p[at]); at += 4;
+   f->dma_disable_ = p[at++] != 0;
+   f->ma_ = p[at++] != 0;
+   f->nw_ = p[at++] != 0;
+   f->nd_ = p[at++] != 0;
+   f->or_ = p[at++] != 0;
+   f->de_ = p[at++] != 0;
+   f->en_ = p[at++] != 0;
+   f->status_0_ = p[at++];
+   f->status_1_ = p[at++];
+   f->status_2_ = p[at++];
+   f->status_3_ = p[at++];
+   f->hu_ = p[at++];
+   f->tp_ = p[at++];
+   f->tr_ = p[at++];
+   f->hd_ = p[at++];
+   f->sc_ = p[at++];
+   f->init_r_ = p[at++];
+   f->sz_ = p[at++];
+   f->ls_ = p[at++];
+   f->gp_ = p[at++];
+   f->sl_ = p[at++];
+   f->fb_ = p[at++];
+   f->nm_ = p[at++];
+   f->seek_cmd_ = p[at++] != 0;
+   f->interrupt_code_ = p[at++];
+   f->seek_end_ = p[at++] != 0;
+   f->force_nd_ = p[at++] != 0;
+   f->last_interrupt_result_ = p[at++];
+   f->interrupt_occured_ = p[at++] != 0;
+   f->ready_line_changed_ = p[at++] != 0;
+   f->busy_ = p[at++];
+   f->main_status_ = p[at++];
+   f->data_register_ = p[at++];
+   f->cb_ = p[at++] != 0;
+   f->rqm_ = p[at++] != 0;
+   f->dio_ = p[at++] != 0;
+   f->exm_ = p[at++] != 0;
+   f->delay_for_instruction_ = GetU32(&p[at]); at += 4;
+   f->time_ = GetU32(&p[at]) | ((uint64_t)GetU32(&p[at+4]) << 32); at += 8;
+   f->time_for_bad_instruction_ = GetU32(&p[at]) | ((uint64_t)GetU32(&p[at+4]) << 32); at += 8;
+   f->rw_command_ = p[at++] != 0;
+   f->cnt_exec_ = GetU32(&p[at]); at += 4;
+   f->old_state_ = (FDC::Phase)GetU32(&p[at]); at += 4;
+   f->current_command_ = (FDC::Commands)GetU32(&p[at]); at += 4;
+   f->index_hole_encountered_ = GetU32(&p[at]); at += 4;
+   f->read_deleted_ = p[at++] != 0;
+   f->write_deleted_ = p[at++] != 0;
+   f->tc_ = p[at++] != 0;
+   f->read_crc_ = GetU16(&p[at]); at += 2;
+   f->seek_track_ = p[at++] != 0;
+   f->stp_ = p[at++];
+   f->format_phase_ = (FDC::MFMPhase)GetU32(&p[at]); at += 4;
+   f->format_sector_count_ = GetU32(&p[at]); at += 4;
+   f->seek_count_ = GetU32(&p[at]); at += 4;
+   memcpy(f->sc_array_, &p[at], 2); at += 2;
+   f->current_drive_ = GetU32(&p[at]); at += 4;
+   f->current_command_phase_ = (FDC::SectorPhase)GetU32(&p[at]); at += 4;
+   f->previous_bit_ = p[at++];
+   f->sync_count_ = p[at++];
+   f->current_data_byte_ = p[at++];
+   f->bit_count_ = p[at++];
+   f->out_index_ = GetU32(&p[at]); at += 4;
+   f->data_to_read_ = GetU32(&p[at]); at += 4;
+   f->data_to_return_ = GetU32(&p[at]); at += 4;
+   f->first_non_0_ = p[at++] != 0;
+   f->read_sector_state_ = GetU32(&p[at]); at += 4;
+   f->read_track_ = p[at++] != 0;
+   f->write_byte_counter_ = GetU32(&p[at]); at += 4;
+   f->byte_to_write_ = p[at++];
+   f->byte_is_sync_ = p[at++] != 0;
+   f->next_phase_ = (FDC::MFMPhase)GetU32(&p[at]); at += 4;
+   f->crc_on_ = p[at++] != 0;
+   f->chrn_byte_count_ = GetU32(&p[at]); at += 4;
+   f->crc_cyte_ = GetU32(&p[at]); at += 4;
+   f->delayed_load_ = p[at++] != 0;
+   f->delayed_load_count_ = GetU32(&p[at]); at += 4;
+   f->delayed_load_drive_ = GetU32(&p[at]); at += 4;
+   f->delayed_load_container_ = p[at++] != 0;
+   f->on_index_ = p[at++] != 0;
+   f->read_data_done_ = p[at++] != 0;
+
+   // Writer and reader must agree byte for byte; if they ever drift apart this
+   // catches it here rather than in a machine that quietly runs wrong.
+   return (at == size);
+}
+
+void MachineState::WriteDrives(Motherboard* board, std::vector<unsigned char>& out)
+{
+   FDC* fdc = board->GetFDC();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkDrives);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   const unsigned int nb_drives = (unsigned int)(sizeof(fdc->disk_) / sizeof(fdc->disk_[0]));
+   PutU32(out, nb_drives);
+
+   for (unsigned int d = 0; d < nb_drives; ++d)
+   {
+      DiskGen* g = &fdc->disk_[d];
+
+      // Identity of the media, so the reader can refuse a mismatch.
+      IDisk* disk = g->disk_;
+      out.push_back(g->disk_present_ ? 1 : 0);
+      out.push_back(disk ? 1 : 0);
+      PutU32(out, disk ? (unsigned int)disk->GetNumberOfSide() : 0);
+      PutU32(out, disk ? disk->GetNumberOfTracks() : 0);
+
+      // Position within that media.
+      PutU32(out, disk ? disk->head_position_ : 0);
+
+      PutU32(out, (unsigned int)g->encode_scheme_);
+      PutU32(out, (unsigned int)g->current_side_);
+      PutU32(out, g->current_track_);
+      PutU32(out, g->side_0_number_);
+      PutU32(out, (unsigned int)g->write_bit_);
+      PutU32(out, (unsigned int)g->current_speed_);
+      PutU32(out, (unsigned int)g->final_speed_);
+      PutU32(out, (unsigned int)g->speed_change_counter_);
+      PutU16(out, g->byte_to_write_);
+      PutU16(out, g->current_mfm_byte_);
+      out.push_back(g->on_index_hole_ ? 1 : 0);
+      out.push_back(g->write_protection_on_ ? 1 : 0);
+      out.push_back(g->fixed_speed_ ? 1 : 0);
+      out.push_back(g->read_ ? 1 : 0);
+      out.push_back(g->sync_write_ ? 1 : 0);
+      out.push_back(g->sync_found_ ? 1 : 0);
+      out.push_back(g->byte_ready_ ? 1 : 0);
+      out.push_back(g->data_bit_ ? 1 : 0);
+      out.push_back(g->motor_on_ ? 1 : 0);
+      out.push_back(g->new_bit_available_ ? 1 : 0);
+
+      // Floats go out as their bits: a decimal round trip would not come back
+      // to the same value, and the timing depends on the exact one.
+      unsigned int bits;
+      memcpy(&bits, &g->time_for_one_bit_, 4); PutU32(out, bits);
+      memcpy(&bits, &g->timer_count_, 4);      PutU32(out, bits);
+   }
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadDrives(Motherboard* board, const unsigned char* p, size_t size)
+{
+   FDC* fdc = board->GetFDC();
+   size_t at = 0;
+   if (size < 4) return false;
+
+   const unsigned int nb_drives = GetU32(&p[at]); at += 4;
+   if (nb_drives != (unsigned int)(sizeof(fdc->disk_) / sizeof(fdc->disk_[0]))) return false;
+
+   for (unsigned int d = 0; d < nb_drives; ++d)
+   {
+      if (at + 62 > size) return false;
+      DiskGen* g = &fdc->disk_[d];
+      IDisk* disk = g->disk_;
+
+      const bool was_present = p[at++] != 0;
+      const bool had_disk = p[at++] != 0;
+      const unsigned int sides = GetU32(&p[at]); at += 4;
+      const unsigned int tracks = GetU32(&p[at]); at += 4;
+      const unsigned int head_position = GetU32(&p[at]); at += 4;
+
+      // Refuse rather than seek into a disk that is not the one described.
+      if (was_present != g->disk_present_) return false;
+      if (had_disk != (disk != nullptr)) return false;
+      if (disk != nullptr)
+      {
+         if (sides != (unsigned int)disk->GetNumberOfSide()) return false;
+         if (tracks != disk->GetNumberOfTracks()) return false;
+         disk->head_position_ = head_position;
+      }
+
+      g->encode_scheme_ = (DiskGen::CodageMfm)GetU32(&p[at]); at += 4;
+      g->current_side_ = (int)GetU32(&p[at]); at += 4;
+      g->current_track_ = GetU32(&p[at]); at += 4;
+      g->side_0_number_ = GetU32(&p[at]); at += 4;
+      g->write_bit_ = (int)GetU32(&p[at]); at += 4;
+      g->current_speed_ = (int)GetU32(&p[at]); at += 4;
+      g->final_speed_ = (int)GetU32(&p[at]); at += 4;
+      g->speed_change_counter_ = (int)GetU32(&p[at]); at += 4;
+      g->byte_to_write_ = GetU16(&p[at]); at += 2;
+      g->current_mfm_byte_ = GetU16(&p[at]); at += 2;
+      g->on_index_hole_ = p[at++] != 0;
+      g->write_protection_on_ = p[at++] != 0;
+      g->fixed_speed_ = p[at++] != 0;
+      g->read_ = p[at++] != 0;
+      g->sync_write_ = p[at++] != 0;
+      g->sync_found_ = p[at++] != 0;
+      g->byte_ready_ = p[at++] != 0;
+      g->data_bit_ = p[at++] != 0;
+      g->motor_on_ = p[at++] != 0;
+      g->new_bit_available_ = p[at++] != 0;
+
+      unsigned int bits;
+      bits = GetU32(&p[at]); at += 4; memcpy(&g->time_for_one_bit_, &bits, 4);
+      bits = GetU32(&p[at]); at += 4; memcpy(&g->timer_count_, &bits, 4);
+   }
+
+   return (at == size);
+}
+
+bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
+{
+   if (machine == nullptr) return false;
+
+   std::vector<unsigned char> sna;
+   if (!machine->SaveSnapshotNow(sna) || sna.empty())
+      return false;
+
+   out.clear();
+   out.insert(out.end(), kMagic, kMagic + 4);
+   PutU16(out, VERSION);
+   PutU16(out, 0);
+   PutU32(out, (unsigned int)sna.size());
+   out.insert(out.end(), sna.begin(), sna.end());
+
+   WriteScheduler(machine->GetMotherboard(), out);
+   WriteZ80(machine->GetMotherboard(), out);
+   WriteGateArray(machine->GetMotherboard(), out);
+   WritePsg(machine->GetMotherboard(), out);
+   WriteFdc(machine->GetMotherboard(), out);
+   WriteDrives(machine->GetMotherboard(), out);
+
+   return true;
+}
+
+bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, size_t size)
+{
+   if (machine == nullptr || buffer == nullptr) return false;
+   if (size < kHeaderSize) return false;
+   if (memcmp(buffer, kMagic, 4) != 0) return false;
+   if (GetU16(&buffer[4]) != VERSION) return false;
+
+   const unsigned int sna_size = GetU32(&buffer[8]);
+   if (sna_size == 0 || kHeaderSize + sna_size > size) return false;
+
+   // The .SNA goes in first: it resets and repopulates the components, so
+   // anything the chunks restore has to be applied after it.
+   if (!machine->LoadSnapshotNow(&buffer[kHeaderSize], sna_size))
+      return false;
+
+   size_t at = kHeaderSize + sna_size;
+   while (at + 8 <= size)
+   {
+      const unsigned int id = GetU32(&buffer[at]);
+      const unsigned int length = GetU32(&buffer[at + 4]);
+      at += 8;
+      if (at + length > size) return false;
+
+      if (id == kChunkScheduler)
+      {
+         if (!ReadScheduler(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkZ80)
+      {
+         if (!ReadZ80(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkGateArray)
+      {
+         if (!ReadGateArray(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkPsg)
+      {
+         if (!ReadPsg(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkFdc)
+      {
+         if (!ReadFdc(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkDrives)
+      {
+         if (!ReadDrives(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      // Unknown chunks are skipped, so a state from a newer build still loads.
+
+      at += length;
+   }
+
+   return true;
+}
