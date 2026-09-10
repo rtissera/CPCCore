@@ -383,14 +383,17 @@ void CSnapshot::LoadStdSna ( unsigned char * header, const unsigned char* buffer
    m_pMachine->GetPPI()->m_EntreeCHigh = (( data & 0x08) == 0x08 );
    */
    // PSG
-   machine_->GetPSG()->register_address_ = header[0x5A];
-
    for (int i = 0; i < 16; i++)
    {
       unsigned char data = i;
       machine_->GetPSG()->Access(&data, 3, 0);
       machine_->GetPSG()->Access( &header[0x5B+i], 2, 0);
    }
+
+   // After the replay, not before: the loop above writes the registers through
+   // the bus, and selecting each one latches register_address_ as a side effect,
+   // leaving it at 15.
+   machine_->GetPSG()->register_address_ = header[0x5A];
 
    // Patch with Version 2 if necessary
    if (snaType == 1)
@@ -1486,9 +1489,9 @@ void CSnapshot::WriteSnapshotV3 ( std::vector<unsigned char>& out, unsigned char
    //   CRTC state flags. (note 7)
    //   Bit	 Function
    //   0	 if "1" VSYNC is active, if "0" VSYNC is inactive (note 8)
-   data |= machine_->GetSig()->h_sync_ ?0x01:0;
+   data |= machine_->GetCRTC()->ff4_?0x01:0;
    //   1	 if "1" HSYNC is active, if "0" HSYNC is inactive (note 9)
-   data |= machine_->GetCRTC()->ff4_?0x02:0;
+   data |= machine_->GetSig()->h_sync_ ?0x02:0;
    //   2-7	 reserved
    //   7	 if "1" Vertical Total Adjust is active, if "0" Vertical Total Adjust is inactive (note 10)
    data |= machine_->GetCRTC()->r4_reached_?0x80:0;
