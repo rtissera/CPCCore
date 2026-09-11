@@ -8,6 +8,7 @@
 #include "PPI.h"
 #include "DMA.h"
 #include "PlayCity.h"
+#include "Memoire.h"
 
 #include <cstring>
 
@@ -95,6 +96,19 @@ const unsigned int kChunkDma = 0x444D4158;  // "DMAX"
 // with it enabled has to carry it or savestates break for everyone who turns it
 // on.
 const unsigned int kChunkPlayCity = 0x50434954;  // "PCIT"
+
+// Expansion RAM beyond the first 64 KB page.
+//
+// The .SNA writer records the dump size as 64 or 128 and emits at most the base
+// bank plus one expansion page, so a 576 KB machine -- SymbOS, OrgaMS, X-MEM,
+// the FutureOS 512 KB configurations -- silently loses 448 KB. Carrying the rest
+// here rather than widening the .SNA keeps the interchange format exactly as it
+// is: other emulators read what they always read, and none of the existing
+// snapshot tests change behaviour.
+//
+// Page 0 is deliberately absent: the .SNA already carries it, and writing it
+// twice would be a second source of truth.
+const unsigned int kChunkExtendedRam = 0x5852414D;  // "XRAM"
 
 
 void PutU16(std::vector<unsigned char>& out, unsigned short v)
@@ -1175,6 +1189,72 @@ bool MachineState::ReadPlayCity(Motherboard* board, const unsigned char* p, size
    return (at == size);
 }
 
+void MachineState::WriteExtendedRam(Motherboard* board, std::vector<unsigned char>& out)
+{
+   Memory* mem = board->GetMem();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkExtendedRam);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   // Which pages this machine has, so a state cannot be applied to a machine
+   // configured with less memory than it describes.
+   unsigned int available = 0;
+   for (int page = 0; page < 8; ++page)
+      if (mem->extended_ram_available_[page]) available |= (1u << page);
+   PutU32(out, available);
+
+   for (int page = 1; page < 8; ++page)
+   {
+      if (!mem->extended_ram_available_[page]) continue;
+      for (int bank = 0; bank < 4; ++bank)
+         out.insert(out.end(), mem->extended_ram_buffer_[page][bank],
+                               mem->extended_ram_buffer_[page][bank] + 0x4000);
+   }
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadExtendedRam(Motherboard* board, const unsigned char* p, size_t size)
+{
+   Memory* mem = board->GetMem();
+   if (size < 4) return false;
+
+   const unsigned int available = GetU32(&p[0]);
+   size_t at = 4;
+
+   unsigned int machine_available = 0;
+   for (int page = 0; page < 8; ++page)
+      if (mem->extended_ram_available_[page]) machine_available |= (1u << page);
+
+   // Refuse rather than half-fill a machine that has different memory: writing
+   // a 576 KB state into a 128 KB machine would drop 448 KB on the floor, and
+   // the reverse would leave stale pages behind.
+   if (available != machine_available) return false;
+
+   size_t expected = 4;
+   for (int page = 1; page < 8; ++page)
+      if (available & (1u << page)) expected += 4 * 0x4000;
+   if (size != expected) return false;
+
+   for (int page = 1; page < 8; ++page)
+   {
+      if (!(available & (1u << page))) continue;
+      for (int bank = 0; bank < 4; ++bank)
+      {
+         memcpy(mem->extended_ram_buffer_[page][bank], &p[at], 0x4000);
+         at += 0x4000;
+      }
+   }
+
+   return (at == size);
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -1201,6 +1281,7 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
    WritePpi(machine->GetMotherboard(), out);
    WriteDma(machine->GetMotherboard(), out);
    WritePlayCity(machine->GetMotherboard(), out);
+   WriteExtendedRam(machine->GetMotherboard(), out);
 
    return true;
 }
@@ -1281,6 +1362,11 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
       else if (id == kChunkPlayCity)
       {
          if (!ReadPlayCity(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkExtendedRam)
+      {
+         if (!ReadExtendedRam(machine->GetMotherboard(), &buffer[at], length))
             return false;
       }
       // Unknown chunks are skipped, so a state from a newer build still loads.

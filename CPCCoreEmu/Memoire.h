@@ -12,6 +12,8 @@ class Monitor;
 
 class Memory : public IDmaSTOP
 {
+   friend class MachineState;
+
    friend class EmulatorEngine;
    friend class CSnapshot;
 

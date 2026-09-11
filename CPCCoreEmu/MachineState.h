@@ -69,4 +69,6 @@ private:
    static bool ReadDma(Motherboard* board, const unsigned char* p, size_t size);
    static void WritePlayCity(Motherboard* board, std::vector<unsigned char>& out);
    static bool ReadPlayCity(Motherboard* board, const unsigned char* p, size_t size);
+   static void WriteExtendedRam(Motherboard* board, std::vector<unsigned char>& out);
+   static bool ReadExtendedRam(Motherboard* board, const unsigned char* p, size_t size);
 };
