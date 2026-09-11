@@ -4,6 +4,7 @@
 #include "Motherboard.h"
 #include "DiskGen.h"
 #include "IDisk.h"
+#include "Tape.h"
 
 #include <cstring>
 
@@ -61,6 +62,15 @@ const unsigned int kChunkDrives = 0x44525653;  // "DRVS"
 // moment a state crosses into a process that did not.
 const unsigned int kChunkCrtc = 0x43525443;  // "CRTC"
 
+// The tape. The .SNA has nothing for it at all -- not even the equivalent of
+// the disk's motor flag and current track -- so everything here is new.
+//
+// Same split as the drives: the flux array is media and stays out, the position
+// within it is state, and the size of the array is recorded so that a state can
+// be refused rather than applied to a different tape.
+const unsigned int kChunkTape = 0x54415045;  // "TAPE"
+
+
 void PutU16(std::vector<unsigned char>& out, unsigned short v)
 {
    out.push_back(v & 0xFF);
@@ -81,6 +91,23 @@ unsigned int GetU32(const unsigned char* p)
 {
    return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
 }
+void PutF64(std::vector<unsigned char>& out, double v)
+{
+   unsigned long long bits;
+   memcpy(&bits, &v, 8);
+   PutU32(out, (unsigned int)(bits & 0xFFFFFFFFu));
+   PutU32(out, (unsigned int)(bits >> 32));
+}
+
+double GetF64(const unsigned char* p)
+{
+   const unsigned long long bits =
+      (unsigned long long)GetU32(p) | ((unsigned long long)GetU32(p + 4) << 32);
+   double v;
+   memcpy(&v, &bits, 8);
+   return v;
+}
+
 
 }  // namespace
 
@@ -804,6 +831,120 @@ bool MachineState::ReadCrtc(Motherboard* board, const unsigned char* p, size_t s
    return (at == size);
 }
 
+void MachineState::WriteTape(Motherboard* board, std::vector<unsigned char>& out)
+{
+   CTape* t = board->GetTape();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkTape);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   // Identity of the tape in the deck.
+   out.push_back(t->is_tape_inserted_ ? 1 : 0);
+   out.push_back(t->tape_array_ != nullptr ? 1 : 0);
+   PutU32(out, t->nb_inversions_);
+   PutU32(out, t->array_size_);
+   PutU32(out, t->nb_blocks_);
+
+   // Where it is.
+   PutU32(out, t->tape_position_);
+   PutU32(out, (unsigned int)(t->remaining_reversal_flux_ & 0xFFFFFFFFu));
+   PutU32(out, (unsigned int)(t->remaining_reversal_flux_ >> 32));
+   PutU32(out, (unsigned int)(t->counter_us_ & 0xFFFFFFFFu));
+   PutU32(out, (unsigned int)(t->counter_us_ >> 32));
+   PutU32(out, (unsigned int)t->counter_sec_);
+   PutU32(out, t->tape_length_);
+
+   out.push_back(t->motor_on_ ? 1 : 0);
+   out.push_back(t->previous_motor_on_ ? 1 : 0);
+   out.push_back(t->next_motor_state_ ? 1 : 0);
+   PutU32(out, (unsigned int)t->time_to_change_motor_state_);
+   out.push_back(t->play_ ? 1 : 0);
+   out.push_back(t->record_ ? 1 : 0);
+   out.push_back(t->start_record_ ? 1 : 0);
+   out.push_back(t->tape_changed_ ? 1 : 0);
+   out.push_back(t->pending_tape_ ? 1 : 0);
+   out.push_back(t->current_level_ ? 1 : 0);
+   out.push_back(t->polarity_inversion_ ? 1 : 0);
+
+   PutU32(out, (unsigned int)t->frequency_);
+   PutU16(out, t->pilot_pulse_);
+   PutU16(out, t->pilot_length_);
+   PutU16(out, t->zero_);
+   PutU16(out, t->one_);
+   PutU32(out, (unsigned int)t->current_block_type_);
+   PutU32(out, (unsigned int)t->current_block_);
+   PutU32(out, t->nb_samples_);
+   PutU32(out, (unsigned int)t->nb_sample_to_read_);
+   PutU32(out, (unsigned int)t->carry_);
+   PutU32(out, (unsigned int)t->oldcarry_);
+   PutF64(out, t->sample_rate_);
+   PutF64(out, t->last_time_);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadTape(Motherboard* board, const unsigned char* p, size_t size)
+{
+   CTape* t = board->GetTape();
+   size_t at = 0;
+   if (size < 100) return false;
+
+   const bool was_inserted = p[at++] != 0;
+   const bool had_flux = p[at++] != 0;
+   const unsigned int nb_inversions = GetU32(&p[at]); at += 4;
+   const unsigned int array_size = GetU32(&p[at]); at += 4;
+   const unsigned int nb_blocks = GetU32(&p[at]); at += 4;
+
+   // Refuse rather than seek into a tape that is not the one described.
+   if (was_inserted != t->is_tape_inserted_) return false;
+   if (had_flux != (t->tape_array_ != nullptr)) return false;
+   if (nb_inversions != t->nb_inversions_) return false;
+   if (array_size != t->array_size_) return false;
+   if (nb_blocks != t->nb_blocks_) return false;
+
+   t->tape_position_ = GetU32(&p[at]); at += 4;
+   t->remaining_reversal_flux_ =
+      (unsigned long long)GetU32(&p[at]) | ((unsigned long long)GetU32(&p[at+4]) << 32); at += 8;
+   t->counter_us_ =
+      (unsigned long long)GetU32(&p[at]) | ((unsigned long long)GetU32(&p[at+4]) << 32); at += 8;
+   t->counter_sec_ = (int)GetU32(&p[at]); at += 4;
+   t->tape_length_ = GetU32(&p[at]); at += 4;
+
+   t->motor_on_ = p[at++] != 0;
+   t->previous_motor_on_ = p[at++] != 0;
+   t->next_motor_state_ = p[at++] != 0;
+   t->time_to_change_motor_state_ = (int)GetU32(&p[at]); at += 4;
+   t->play_ = p[at++] != 0;
+   t->record_ = p[at++] != 0;
+   t->start_record_ = p[at++] != 0;
+   t->tape_changed_ = p[at++] != 0;
+   t->pending_tape_ = p[at++] != 0;
+   t->current_level_ = p[at++] != 0;
+   t->polarity_inversion_ = p[at++] != 0;
+
+   t->frequency_ = (int)GetU32(&p[at]); at += 4;
+   t->pilot_pulse_ = GetU16(&p[at]); at += 2;
+   t->pilot_length_ = GetU16(&p[at]); at += 2;
+   t->zero_ = GetU16(&p[at]); at += 2;
+   t->one_ = GetU16(&p[at]); at += 2;
+   t->current_block_type_ = (int)GetU32(&p[at]); at += 4;
+   t->current_block_ = (int)GetU32(&p[at]); at += 4;
+   t->nb_samples_ = GetU32(&p[at]); at += 4;
+   t->nb_sample_to_read_ = (int)GetU32(&p[at]); at += 4;
+   t->carry_ = (int)GetU32(&p[at]); at += 4;
+   t->oldcarry_ = (int)GetU32(&p[at]); at += 4;
+   t->sample_rate_ = GetF64(&p[at]); at += 8;
+   t->last_time_ = GetF64(&p[at]); at += 8;
+
+   return (at == size);
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -826,6 +967,7 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
    WriteFdc(machine->GetMotherboard(), out);
    WriteDrives(machine->GetMotherboard(), out);
    WriteCrtc(machine->GetMotherboard(), out);
+   WriteTape(machine->GetMotherboard(), out);
 
    return true;
 }
@@ -886,6 +1028,11 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
       else if (id == kChunkCrtc)
       {
          if (!ReadCrtc(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkTape)
+      {
+         if (!ReadTape(machine->GetMotherboard(), &buffer[at], length))
             return false;
       }
       // Unknown chunks are skipped, so a state from a newer build still loads.
