@@ -3,6 +3,8 @@
 #include "TestUtils.h"
 #include "MachineState.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -339,4 +341,242 @@ TEST(MachineStateTest, RefusesAStateTakenWithNoDiskWhenOneIsInserted)
 
    EXPECT_FALSE(loaded)
       << "a state taken with an empty drive was applied to a loaded one";
+}
+
+// Every test above restores into the machine that saved, so a chunk holding a
+// raw pointer would still work: the object it points at is exactly where it was.
+// A savestate has to survive being loaded into a machine built from scratch,
+// whose components sit at different addresses. This is the cheap half of that
+// (same process, fresh instance); the expensive half is another process
+// entirely, which only differs by also reshuffling the address space.
+TEST(MachineStateTest, LoadsIntoAMachineThatDidNotSaveIt)
+{
+   const int kSlicesAfter = 400;
+
+   std::vector<unsigned char> state;
+   Fingerprint expected;
+
+   {
+      DirectoriesImp dirImp; CDisplay display; Log log;
+      SoundFactory soundFactory; ConfigurationManager conf_manager;
+      EmulatorEngine* saver =
+         NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
+
+      for (int i = 0; i < 137; ++i)
+         saver->RunTimeSlice();
+
+      ASSERT_TRUE(MachineState::Save(saver, state));
+
+      for (int i = 0; i < kSlicesAfter; ++i)
+         saver->RunTimeSlice();
+      expected = Capture(saver);
+
+      delete saver;
+   }
+
+   // A second machine, deliberately run a different distance so that nothing it
+   // already holds could make the comparison pass by accident.
+   DirectoriesImp dirImp; CDisplay display; Log log;
+   SoundFactory soundFactory; ConfigurationManager conf_manager;
+   EmulatorEngine* loader =
+      NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
+
+   for (int i = 0; i < 61; ++i)
+      loader->RunTimeSlice();
+
+   const Fingerprint before_load = Capture(loader);
+   ASSERT_TRUE(MachineState::Load(loader, &state[0], state.size()));
+
+   for (int i = 0; i < kSlicesAfter; ++i)
+      loader->RunTimeSlice();
+   const Fingerprint actual = Capture(loader);
+
+   delete loader;
+
+   ASSERT_EQ(expected.fields.size(), actual.fields.size());
+
+   bool differed_before = false;
+   for (size_t i = 0; i < before_load.fields.size(); ++i)
+      if (before_load.fields[i].second != expected.fields[i].second)
+         differed_before = true;
+   ASSERT_TRUE(differed_before)
+      << "the second machine already matched before loading, so this proves nothing";
+
+   int divergent = 0;
+   for (size_t i = 0; i < expected.fields.size(); ++i)
+   {
+      if (expected.fields[i].second == actual.fields[i].second) continue;
+      ++divergent;
+      fprintf(stderr, "  DIFFERS IN A FRESH MACHINE: %s\n", expected.fields[i].first.c_str());
+   }
+   fprintf(stderr, "CROSS INSTANCE: %d of %zu fields diverged\n",
+      divergent, expected.fields.size());
+
+   EXPECT_EQ(0, divergent)
+      << "the state depends on the machine instance that wrote it";
+}
+
+// ---------------------------------------------------------------------------
+// A state has to survive the process that wrote it.
+//
+// Everything above runs in one process, where a chunk that accidentally held a
+// host address would still work: the address is still valid. A savestate is
+// written, the emulator is closed, and the file is opened again days later in a
+// process whose heap and code sit somewhere else entirely. That is the case
+// that matters, and the only way to test it is to actually be a second process.
+//
+// So the test re-runs this binary. The child is the disabled test below, told
+// where to write by an argument the parent adds; it saves a state and the
+// fingerprint of the run that follows it. The parent then loads that state cold
+// and checks it reaches the same fingerprint.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+const char kStateOutFlag[] = "--machine-state-out=";
+
+std::string ArgumentValue(const char* prefix)
+{
+   const std::vector<std::string> argv = testing::internal::GetArgvs();
+   const size_t n = strlen(prefix);
+   for (size_t i = 0; i < argv.size(); ++i)
+      if (argv[i].compare(0, n, prefix) == 0)
+         return argv[i].substr(n);
+   return std::string();
+}
+
+bool WriteWholeFile(const std::string& path, const std::vector<unsigned char>& data)
+{
+   FILE* f = fopen(path.c_str(), "wb");
+   if (f == nullptr) return false;
+   const bool ok = data.empty() || fwrite(&data[0], 1, data.size(), f) == data.size();
+   fclose(f);
+   return ok;
+}
+
+bool ReadWholeFile(const std::string& path, std::vector<unsigned char>& data)
+{
+   FILE* f = fopen(path.c_str(), "rb");
+   if (f == nullptr) return false;
+   fseek(f, 0, SEEK_END);
+   const long size = ftell(f);
+   fseek(f, 0, SEEK_SET);
+   bool ok = size > 0;
+   if (ok)
+   {
+      data.resize((size_t)size);
+      ok = fread(&data[0], 1, (size_t)size, f) == (size_t)size;
+   }
+   fclose(f);
+   return ok;
+}
+
+void WriteFingerprint(const std::string& path, const Fingerprint& f)
+{
+   FILE* out = fopen(path.c_str(), "wb");
+   ASSERT_NE(nullptr, out);
+   for (size_t i = 0; i < f.fields.size(); ++i)
+      fprintf(out, "%s %llu\n", f.fields[i].first.c_str(),
+              (unsigned long long)f.fields[i].second);
+   fclose(out);
+}
+
+// The distances the two processes agree on. Kept here so the child and the
+// parent cannot drift apart.
+const int kCrossProcessSlicesBeforeSave = 137;
+const int kCrossProcessSlicesAfterSave = 400;
+
+}  // namespace
+
+// Runs only in the child, which the parent starts with the output path appended.
+TEST(MachineStateTest, DISABLED_CrossProcessProducer)
+{
+   const std::string state_path = ArgumentValue(kStateOutFlag);
+   ASSERT_FALSE(state_path.empty())
+      << "this test is the child half of CrossProcess and is not meant to be run "
+         "on its own";
+
+   DirectoriesImp dirImp; CDisplay display; Log log;
+   SoundFactory soundFactory; ConfigurationManager conf_manager;
+   EmulatorEngine* machine =
+      NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
+
+   for (int i = 0; i < kCrossProcessSlicesBeforeSave; ++i)
+      machine->RunTimeSlice();
+
+   std::vector<unsigned char> state;
+   ASSERT_TRUE(MachineState::Save(machine, state));
+   ASSERT_TRUE(WriteWholeFile(state_path, state));
+
+   for (int i = 0; i < kCrossProcessSlicesAfterSave; ++i)
+      machine->RunTimeSlice();
+   WriteFingerprint(state_path + ".fingerprint", Capture(machine));
+
+   delete machine;
+}
+
+TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
+{
+   const std::vector<std::string> argv = testing::internal::GetArgvs();
+   ASSERT_FALSE(argv.empty());
+
+   const std::string state_path = testing::TempDir() + "cpccore_cross_process.state";
+   const std::string fingerprint_path = state_path + ".fingerprint";
+   remove(state_path.c_str());
+   remove(fingerprint_path.c_str());
+
+   std::string command = "\"" + argv[0] + "\""
+      + " --gtest_also_run_disabled_tests"
+      + " --gtest_filter=MachineStateTest.DISABLED_CrossProcessProducer"
+      + " " + kStateOutFlag + "\"" + state_path + "\"";
+   ASSERT_EQ(0, system(command.c_str()))
+      << "the child process failed; command was: " << command;
+
+   std::vector<unsigned char> state;
+   ASSERT_TRUE(ReadWholeFile(state_path, state))
+      << "the child wrote no state at " << state_path;
+
+   FILE* fp = fopen(fingerprint_path.c_str(), "rb");
+   ASSERT_NE(nullptr, fp);
+   std::vector<std::pair<std::string, unsigned long long> > expected;
+   char name[128];
+   unsigned long long value;
+   while (fscanf(fp, "%127s %llu", name, &value) == 2)
+      expected.push_back(std::make_pair(std::string(name), value));
+   fclose(fp);
+   ASSERT_FALSE(expected.empty());
+
+   // Cold load, in this process, into a machine that has never seen that state.
+   DirectoriesImp dirImp; CDisplay display; Log log;
+   SoundFactory soundFactory; ConfigurationManager conf_manager;
+   EmulatorEngine* machine =
+      NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
+
+   ASSERT_TRUE(MachineState::Load(machine, &state[0], state.size()))
+      << "a state written by another process was refused";
+
+   for (int i = 0; i < kCrossProcessSlicesAfterSave; ++i)
+      machine->RunTimeSlice();
+   const Fingerprint actual = Capture(machine);
+
+   delete machine;
+   remove(state_path.c_str());
+   remove(fingerprint_path.c_str());
+
+   ASSERT_EQ(expected.size(), actual.fields.size());
+
+   int divergent = 0;
+   for (size_t i = 0; i < expected.size(); ++i)
+   {
+      ASSERT_EQ(expected[i].first, actual.fields[i].first);
+      if (expected[i].second == actual.fields[i].second) continue;
+      ++divergent;
+      fprintf(stderr, "  DIFFERS ACROSS PROCESSES: %s\n", expected[i].first.c_str());
+   }
+   fprintf(stderr, "CROSS PROCESS: %d of %zu fields diverged\n",
+      divergent, expected.size());
+
+   EXPECT_EQ(0, divergent)
+      << "the state did not survive being written by another process";
 }

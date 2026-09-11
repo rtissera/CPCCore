@@ -52,4 +52,6 @@ private:
    static bool ReadFdc(Motherboard* board, const unsigned char* p, size_t size);
    static void WriteDrives(Motherboard* board, std::vector<unsigned char>& out);
    static bool ReadDrives(Motherboard* board, const unsigned char* p, size_t size);
+   static void WriteCrtc(Motherboard* board, std::vector<unsigned char>& out);
+   static bool ReadCrtc(Motherboard* board, const unsigned char* p, size_t size);
 };

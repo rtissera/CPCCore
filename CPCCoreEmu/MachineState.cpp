@@ -55,6 +55,12 @@ const unsigned int kChunkFdc = 0x46444358;  // "FDCX"
 // Restoring a head position into a different disk would seek into nothing.
 const unsigned int kChunkDrives = 0x44525653;  // "DRVS"
 
+// The CRTC. The .SNA carries eighteen of the thirty-two registers and a handful
+// of the counters; the rest keeps whatever the machine happened to boot with,
+// which is invisible while both machines booted the same way and shows up the
+// moment a state crosses into a process that did not.
+const unsigned int kChunkCrtc = 0x43525443;  // "CRTC"
+
 void PutU16(std::vector<unsigned char>& out, unsigned short v)
 {
    out.push_back(v & 0xFF);
@@ -714,6 +720,90 @@ bool MachineState::ReadDrives(Motherboard* board, const unsigned char* p, size_t
    return (at == size);
 }
 
+void MachineState::WriteCrtc(Motherboard* board, std::vector<unsigned char>& out)
+{
+   CRTC* c = board->GetCRTC();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkCrtc);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   out.insert(out.end(), c->registers_list_, c->registers_list_ + 32);
+   out.insert(out.end(), c->registers_mask_, c->registers_mask_ + 32);
+   PutU16(out, c->ma_);
+   PutU16(out, c->bu_);
+   PutU32(out, (unsigned int)c->sscr_bit_8_);
+   out.push_back(c->vlc_);
+   out.push_back(c->adddress_register_);
+   out.push_back(c->status_register_);
+   out.push_back(c->status1_);
+   out.push_back(c->status2_);
+   out.push_back(c->hcc_);
+   out.push_back(c->horinzontal_pulse_);
+   out.push_back(c->vcc_);
+   out.push_back(c->scanline_vbl_);
+   out.push_back(c->vertical_sync_width_);
+   out.push_back(c->horizontal_sync_width_);
+   out.push_back(c->vertical_adjust_counter_);
+   out.push_back(c->r4_reached_ ? 1 : 0);
+   out.push_back(c->ff1_ ? 1 : 0);
+   out.push_back(c->ff3_ ? 1 : 0);
+   out.push_back(c->ff4_ ? 1 : 0);
+   out.push_back(c->mux_ ? 1 : 0);
+   out.push_back(c->mux_set_ ? 1 : 0);
+   out.push_back(c->mux_reset_ ? 1 : 0);
+   out.push_back(c->lightpen_input_ ? 1 : 0);
+   out.push_back(c->r9_triggered_ ? 1 : 0);
+   out.push_back(c->r4_triggered_ ? 1 : 0);
+   out.push_back(c->even_field_ ? 1 : 0);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadCrtc(Motherboard* board, const unsigned char* p, size_t size)
+{
+   CRTC* c = board->GetCRTC();
+   size_t at = 0;
+   // 32 + 32 registers, ma_, bu_, sscr_bit_8_, then twelve bytes and eleven flags.
+   if (size < 95) return false;
+
+   memcpy(c->registers_list_, &p[at], 32); at += 32;
+   memcpy(c->registers_mask_, &p[at], 32); at += 32;
+   c->ma_ = GetU16(&p[at]); at += 2;
+   c->bu_ = GetU16(&p[at]); at += 2;
+   c->sscr_bit_8_ = (int)GetU32(&p[at]); at += 4;
+   c->vlc_ = p[at++];
+   c->adddress_register_ = p[at++];
+   c->status_register_ = p[at++];
+   c->status1_ = p[at++];
+   c->status2_ = p[at++];
+   c->hcc_ = p[at++];
+   c->horinzontal_pulse_ = p[at++];
+   c->vcc_ = p[at++];
+   c->scanline_vbl_ = p[at++];
+   c->vertical_sync_width_ = p[at++];
+   c->horizontal_sync_width_ = p[at++];
+   c->vertical_adjust_counter_ = p[at++];
+   c->r4_reached_ = p[at++] != 0;
+   c->ff1_ = p[at++] != 0;
+   c->ff3_ = p[at++] != 0;
+   c->ff4_ = p[at++] != 0;
+   c->mux_ = p[at++] != 0;
+   c->mux_set_ = p[at++] != 0;
+   c->mux_reset_ = p[at++] != 0;
+   c->lightpen_input_ = p[at++] != 0;
+   c->r9_triggered_ = p[at++] != 0;
+   c->r4_triggered_ = p[at++] != 0;
+   c->even_field_ = p[at++] != 0;
+
+   return (at == size);
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -735,6 +825,7 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
    WritePsg(machine->GetMotherboard(), out);
    WriteFdc(machine->GetMotherboard(), out);
    WriteDrives(machine->GetMotherboard(), out);
+   WriteCrtc(machine->GetMotherboard(), out);
 
    return true;
 }
@@ -790,6 +881,11 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
       else if (id == kChunkDrives)
       {
          if (!ReadDrives(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkCrtc)
+      {
+         if (!ReadCrtc(machine->GetMotherboard(), &buffer[at], length))
             return false;
       }
       // Unknown chunks are skipped, so a state from a newer build still loads.
