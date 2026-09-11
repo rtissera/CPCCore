@@ -95,6 +95,8 @@ public:
    // Configuration
    void SetPlus(bool plus);
    bool IsPLUS() { return plus_; }
+   void SetMachineType(int type) { type_machine_ = type; }
+   int GetMachineType() { return type_machine_; }
 
    ///////////////////////////////////////
    // Get machine info
@@ -163,6 +165,10 @@ protected:
 
    // Specific configuration
    bool plus_;
+   // MachineSettings::HardwareType. Kept here rather than on EmulatorEngine so
+   // that the components and CSnapshot, which only ever see a Motherboard, can
+   // reach it.
+   int type_machine_;
 
    // Inner hardware
    Bus address_bus_;

@@ -5,6 +5,7 @@ Motherboard::Motherboard(SoundMixer* sound_mixer, IKeyboardHandler* keyboard_han
    generic_breakpoint_(nullptr),
    supervisor_(nullptr),
    plus_(false),
+   type_machine_(0),
    address_bus_(16), data_bus_(8),
    memory_(&monitor_), 
    keyboardhandler_(keyboard_handler),

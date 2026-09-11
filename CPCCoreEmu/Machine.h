@@ -161,8 +161,8 @@ public:
    void Resync ();
    void StartPrecise(unsigned int nb_cycles);
    void UpdateExternalDevices();
-   void SetMachineType(int type) { type_machine_ = type; };
-   int GetMachineType() { return type_machine_; }
+   void SetMachineType(int type) { motherboard_.SetMachineType(type); };
+   int GetMachineType() { return motherboard_.GetMachineType(); }
    void SetPlus(bool plus);
    bool IsPLUS() { return motherboard_.IsPLUS(); }
 
@@ -358,7 +358,6 @@ protected:
    /////////////////////////////////
    // Netlists
 
-   int type_machine_;
    bool do_snapshot_;
    std::string snapshot_file_;
 
