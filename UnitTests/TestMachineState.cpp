@@ -5,6 +5,12 @@
 
 #include <cstdio>
 #include <cstdlib>
+#ifndef _WIN32
+#include <unistd.h>
+#else
+#include <process.h>
+#define getpid _getpid
+#endif
 #include <string>
 #include <vector>
 
@@ -530,6 +536,9 @@ void WriteFingerprint(const std::string& path, const Fingerprint& f)
 {
    FILE* out = fopen(path.c_str(), "wb");
    ASSERT_NE(nullptr, out);
+   // First line identifies the writer, so the parent can tell its own child's
+   // output from a file left by some other test process.
+   fprintf(out, "pid %ld\n", (long)getpid());
    for (size_t i = 0; i < f.fields.size(); ++i)
       fprintf(out, "%s %llu\n", f.fields[i].first.c_str(),
               (unsigned long long)f.fields[i].second);
@@ -583,7 +592,13 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
    const std::vector<std::string> argv = testing::internal::GetArgvs();
    ASSERT_FALSE(argv.empty());
 
-   const std::string state_path = testing::TempDir() + "cpccore_cross_process.state";
+   // Per-process path. A fixed name in the temp directory is shared by every
+   // test process on the machine, so two runs at once -- ctest -j, or simply two
+   // shells -- would overwrite each other's state between the child writing it
+   // and the parent reading it.
+   char unique[64];
+   snprintf(unique, sizeof(unique), "cpccore_cross_process_%ld.state", (long)getpid());
+   const std::string state_path = testing::TempDir() + unique;
    const std::string fingerprint_path = state_path + ".fingerprint";
    remove(state_path.c_str());
    remove(fingerprint_path.c_str());
@@ -604,10 +619,16 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
    std::vector<std::pair<std::string, unsigned long long> > expected;
    char name[128];
    unsigned long long value;
+   long writer_pid = 0;
+   if (fscanf(fp, "pid %ld\n", &writer_pid) != 1)
+      writer_pid = 0;
    while (fscanf(fp, "%127s %llu", name, &value) == 2)
       expected.push_back(std::make_pair(std::string(name), value));
    fclose(fp);
    ASSERT_FALSE(expected.empty());
+   ASSERT_NE(0, writer_pid)
+      << "the fingerprint carries no writer id, so it cannot be attributed to "
+         "this test's own child";
 
    // Cold load, in this process, into a machine that has never seen that state.
    DirectoriesImp dirImp; CDisplay display; Log log;
