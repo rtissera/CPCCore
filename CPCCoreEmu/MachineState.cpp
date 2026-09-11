@@ -738,7 +738,7 @@ bool MachineState::ReadDrives(Motherboard* board, const unsigned char* p, size_t
 
    for (unsigned int d = 0; d < nb_drives; ++d)
    {
-      if (at + 62 > size) return false;
+      if (at + 68 > size) return false;
       DiskGen* g = &fdc->disk_[d];
       IDisk* disk = g->disk_;
 
@@ -1255,6 +1255,92 @@ bool MachineState::ReadExtendedRam(Motherboard* board, const unsigned char* p, s
    return (at == size);
 }
 
+// Does this state describe the machine it is about to be loaded into?
+//
+// A chunk that refuses halfway through leaves the machine part restored: the
+// .SNA and every chunk before it have already been applied, and the caller is
+// told the load failed while the emulator carries on with a machine that is
+// neither where it was nor where the state wanted it. The frontend shows an
+// error and the user keeps playing something broken.
+//
+// The refusals that happen in practice are the ones about the machine rather
+// than the buffer -- a state from a 576 KB machine on a 128 KB one, from a
+// different disk, a different tape -- so those are checked first, across every
+// chunk, and the load is abandoned before a single byte is written. A size that
+// disagrees means a corrupt buffer, which is a different problem and still
+// fails partway.
+bool MachineState::DescribesThisMachine(Motherboard* board,
+                                        const unsigned char* buffer, size_t size,
+                                        size_t first_chunk)
+{
+   size_t at = first_chunk;
+   while (at + 8 <= size)
+   {
+      const unsigned int id = GetU32(&buffer[at]);
+      const unsigned int length = GetU32(&buffer[at + 4]);
+      at += 8;
+      if (at + length > size) return false;
+
+      const unsigned char* p = &buffer[at];
+
+      if (id == kChunkScheduler)
+      {
+         if (length < 12) return false;
+         if ((int)GetU32(&p[4]) != board->nb_components_) return false;
+      }
+      else if (id == kChunkDrives)
+      {
+         if (length < 4) return false;
+         const unsigned int nb_drives = GetU32(&p[0]);
+         if (nb_drives != (unsigned int)(sizeof(board->GetFDC()->disk_)
+                                       / sizeof(board->GetFDC()->disk_[0]))) return false;
+         size_t d_at = 4;
+         for (unsigned int d = 0; d < nb_drives; ++d)
+         {
+            // Identity, then position: 14 + 32 + 4 + 10 + 8 bytes per drive.
+            const size_t kPerDrive = 68;
+            if (d_at + kPerDrive > length) return false;
+            DiskGen* g = &board->GetFDC()->disk_[d];
+            IDisk* disk = g->disk_;
+            const bool was_present = p[d_at] != 0;
+            const bool had_disk = p[d_at + 1] != 0;
+            const unsigned int sides = GetU32(&p[d_at + 2]);
+            const unsigned int tracks = GetU32(&p[d_at + 6]);
+            if (was_present != g->disk_present_) return false;
+            if (had_disk != (disk != nullptr)) return false;
+            if (disk != nullptr)
+            {
+               if (sides != (unsigned int)disk->GetNumberOfSide()) return false;
+               if (tracks != disk->GetNumberOfTracks()) return false;
+            }
+            d_at += kPerDrive;
+         }
+      }
+      else if (id == kChunkTape)
+      {
+         if (length < 14) return false;
+         CTape* t = board->GetTape();
+         if ((p[0] != 0) != t->is_tape_inserted_) return false;
+         if ((p[1] != 0) != (t->tape_array_ != nullptr)) return false;
+         if (GetU32(&p[2]) != t->nb_inversions_) return false;
+         if (GetU32(&p[6]) != t->array_size_) return false;
+         if (GetU32(&p[10]) != t->nb_blocks_) return false;
+      }
+      else if (id == kChunkExtendedRam)
+      {
+         if (length < 4) return false;
+         unsigned int machine_available = 0;
+         for (int page = 0; page < 8; ++page)
+            if (board->GetMem()->extended_ram_available_[page])
+               machine_available |= (1u << page);
+         if (GetU32(&p[0]) != machine_available) return false;
+      }
+
+      at += length;
+   }
+   return true;
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -1295,6 +1381,12 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
 
    const unsigned int sna_size = GetU32(&buffer[8]);
    if (sna_size == 0 || kHeaderSize + sna_size > size) return false;
+
+   // Check what the chunks say about this machine before touching it, so a
+   // state meant for another machine is refused instead of half applied.
+   if (!DescribesThisMachine(machine->GetMotherboard(), buffer, size,
+                             kHeaderSize + sna_size))
+      return false;
 
    // The .SNA goes in first: it resets and repopulates the components, so
    // anything the chunks restore has to be applied after it.

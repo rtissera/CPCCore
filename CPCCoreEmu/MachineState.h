@@ -71,4 +71,10 @@ private:
    static bool ReadPlayCity(Motherboard* board, const unsigned char* p, size_t size);
    static void WriteExtendedRam(Motherboard* board, std::vector<unsigned char>& out);
    static bool ReadExtendedRam(Motherboard* board, const unsigned char* p, size_t size);
+
+   // Everything a chunk checks about the machine it is being loaded into,
+   // verified before anything is written. See the comment on the definition.
+   static bool DescribesThisMachine(Motherboard* board,
+                                    const unsigned char* buffer, size_t size,
+                                    size_t first_chunk);
 };

@@ -235,3 +235,63 @@ TEST(MachineStateRam, RefusesAMalformedExpansionChunk)
 
    delete machine;
 }
+
+// A refused state must leave the machine untouched, not part restored.
+//
+// The chunks are applied one after another, so a refusal partway used to leave
+// the .SNA and every earlier chunk already in place: the frontend reports a
+// failed load and the user carries on with a machine that is neither where it
+// was nor where the state wanted it.
+TEST(MachineStateRam, ARefusedStateLeavesTheMachineAlone)
+{
+   std::vector<unsigned char> foreign;
+   {
+      DirectoriesImp dirImp; CDisplay display; Log log;
+      SoundFactory soundFactory; ConfigurationManager conf_manager;
+      EmulatorEngine* other =
+         BootWithConfig(dirImp, display, log, soundFactory, conf_manager, k576K.cfg);
+      ASSERT_EQ(8, AvailablePages(other));
+      PoisonPages(other, 0x70);
+      ASSERT_TRUE(MachineState::Save(other, foreign));
+      delete other;
+   }
+
+   DirectoriesImp dirImp; CDisplay display; Log log;
+   SoundFactory soundFactory; ConfigurationManager conf_manager;
+   EmulatorEngine* machine =
+      BootWithConfig(dirImp, display, log, soundFactory, conf_manager, k128K.cfg);
+   ASSERT_EQ(1, AvailablePages(machine));
+
+   machine->GetMem()->ConnectBank(0, 0, 0);
+   machine->GetMem()->Set(kProbe, 0x3C);
+   PoisonPages(machine, 0xE0);
+
+   // Fingerprint the machine widely enough that a partial restore shows up.
+   const std::vector<int> pages_before = ReadPages(machine);
+   machine->GetMem()->ConnectBank(0, 0, 0);
+   const int base_before = machine->GetMem()->Get(kProbe);
+   const unsigned short pc_before = machine->GetProc()->pc_;
+   const unsigned short sp_before = machine->GetProc()->sp_;
+   const unsigned char hcc_before = machine->GetCRTC()->hcc_;
+   const unsigned char vcc_before = machine->GetCRTC()->vcc_;
+
+   ASSERT_FALSE(MachineState::Load(machine, &foreign[0], foreign.size()))
+      << "a 576K state was accepted by a 128K machine";
+
+   const std::vector<int> pages_after = ReadPages(machine);
+   machine->GetMem()->ConnectBank(0, 0, 0);
+   const int base_after = machine->GetMem()->Get(kProbe);
+   const unsigned short pc_after = machine->GetProc()->pc_;
+   const unsigned short sp_after = machine->GetProc()->sp_;
+   const unsigned char hcc_after = machine->GetCRTC()->hcc_;
+   const unsigned char vcc_after = machine->GetCRTC()->vcc_;
+
+   delete machine;
+
+   EXPECT_EQ(pages_before, pages_after)   << "RAM was modified by a refused load";
+   EXPECT_EQ(base_before, base_after)     << "the base bank was modified by a refused load";
+   EXPECT_EQ(pc_before, pc_after)         << "the CPU was moved by a refused load";
+   EXPECT_EQ(sp_before, sp_after)         << "the CPU was moved by a refused load";
+   EXPECT_EQ(hcc_before, hcc_after)       << "the CRTC was moved by a refused load";
+   EXPECT_EQ(vcc_before, vcc_after)       << "the CRTC was moved by a refused load";
+}
