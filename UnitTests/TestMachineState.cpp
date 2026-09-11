@@ -8,6 +8,7 @@
 #ifndef _WIN32
 #include <unistd.h>
 #else
+#include <io.h>
 #include <process.h>
 #define getpid _getpid
 #endif
@@ -496,6 +497,28 @@ namespace
 
 const char kStateOutFlag[] = "--machine-state-out=";
 
+// A path no other process can be using.
+//
+// A fixed name in the temp directory is shared by every test process on the
+// machine, and a name built from the process id still collides with a stale file
+// left by a crashed run that happened to have the same id. Let the OS pick,
+// atomically, and delete it when done.
+std::string CreateUniqueStatePath()
+{
+   std::string pattern = testing::TempDir() + "cpccore_state_XXXXXX";
+   std::vector<char> buffer(pattern.begin(), pattern.end());
+   buffer.push_back('\0');
+
+#ifndef _WIN32
+   const int fd = mkstemp(&buffer[0]);
+   if (fd < 0) return std::string();
+   close(fd);
+#else
+   if (_mktemp_s(&buffer[0], buffer.size()) != 0) return std::string();
+#endif
+   return std::string(&buffer[0]);
+}
+
 std::string ArgumentValue(const char* prefix)
 {
    const std::vector<std::string> argv = testing::internal::GetArgvs();
@@ -592,16 +615,9 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
    const std::vector<std::string> argv = testing::internal::GetArgvs();
    ASSERT_FALSE(argv.empty());
 
-   // Per-process path. A fixed name in the temp directory is shared by every
-   // test process on the machine, so two runs at once -- ctest -j, or simply two
-   // shells -- would overwrite each other's state between the child writing it
-   // and the parent reading it.
-   char unique[64];
-   snprintf(unique, sizeof(unique), "cpccore_cross_process_%ld.state", (long)getpid());
-   const std::string state_path = testing::TempDir() + unique;
+   const std::string state_path = CreateUniqueStatePath();
+   ASSERT_FALSE(state_path.empty()) << "could not create a temporary file";
    const std::string fingerprint_path = state_path + ".fingerprint";
-   remove(state_path.c_str());
-   remove(fingerprint_path.c_str());
 
    std::string command = "\"" + argv[0] + "\""
       + " --gtest_also_run_disabled_tests"
