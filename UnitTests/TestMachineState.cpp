@@ -615,16 +615,48 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
    EmulatorEngine* machine =
       NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
 
-   // If this ever refuses, the message has to say enough to tell a real
-   // incompatibility from a stale file: it failed once during development and
-   // the bare assertion said nothing useful.
+   // This refused once during development and was never reproduced, in over a
+   // hundred targeted runs. Rather than guess at a fix, describe the state fully
+   // when it happens: header, and every chunk with its length, so the next
+   // occurrence names the culprit instead of restarting the investigation.
    ASSERT_GE(state.size(), 12u);
-   ASSERT_TRUE(MachineState::Load(machine, &state[0], state.size()))
-      << "a state written by another process was refused. " << state.size()
-      << " bytes, magic " << state[0] << state[1] << state[2] << state[3]
-      << ", version " << (state[4] | (state[5] << 8))
-      << " (this build writes " << MachineState::kVersion << ")"
-      << ", from " << state_path;
+   if (!MachineState::Load(machine, &state[0], state.size()))
+   {
+      std::string report;
+      char line[256];
+      snprintf(line, sizeof(line), "%zu bytes, magic %c%c%c%c, version %u (build writes %u)",
+               state.size(), state[0], state[1], state[2], state[3],
+               (unsigned)(state[4] | (state[5] << 8)), (unsigned)MachineState::kVersion);
+      report = line;
+
+      const unsigned int sna_len = state[8] | (state[9] << 8)
+                                 | (state[10] << 16) | ((unsigned int)state[11] << 24);
+      snprintf(line, sizeof(line), "\n  .SNA %u bytes", sna_len);
+      report += line;
+
+      size_t at = 12 + sna_len;
+      while (at + 8 <= state.size())
+      {
+         const unsigned int id = state[at] | (state[at+1] << 8)
+                               | (state[at+2] << 16) | ((unsigned int)state[at+3] << 24);
+         const unsigned int len = state[at+4] | (state[at+5] << 8)
+                                | (state[at+6] << 16) | ((unsigned int)state[at+7] << 24);
+         snprintf(line, sizeof(line), "\n  chunk %c%c%c%c %u bytes",
+                  (char)((id >> 24) & 0xFF), (char)((id >> 16) & 0xFF),
+                  (char)((id >> 8) & 0xFF), (char)(id & 0xFF), len);
+         report += line;
+         at += 8 + len;
+      }
+      if (at != state.size())
+      {
+         snprintf(line, sizeof(line), "\n  TRAILING: chunk walk ended at %zu of %zu",
+                  at, state.size());
+         report += line;
+      }
+
+      FAIL() << "a state written by another process was refused.\n  " << report
+             << "\n  from " << state_path;
+   }
 
    for (int i = 0; i < kCrossProcessSlicesAfterSave; ++i)
       machine->RunTimeSlice();
