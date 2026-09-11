@@ -5,6 +5,7 @@
 
 class EmulatorEngine;
 class Motherboard;
+class YMZ294;
 
 // A save state for the whole engine, as opposed to a .SNA.
 //
@@ -58,4 +59,10 @@ private:
    static bool ReadTape(Motherboard* board, const unsigned char* p, size_t size);
    static void WritePpi(Motherboard* board, std::vector<unsigned char>& out);
    static bool ReadPpi(Motherboard* board, const unsigned char* p, size_t size);
+   static void WriteYmz(YMZ294* y, std::vector<unsigned char>& out);
+   static void ReadYmz(YMZ294* y, const unsigned char* p, size_t& at);
+   static void WriteDma(Motherboard* board, std::vector<unsigned char>& out);
+   static bool ReadDma(Motherboard* board, const unsigned char* p, size_t size);
+   static void WritePlayCity(Motherboard* board, std::vector<unsigned char>& out);
+   static bool ReadPlayCity(Motherboard* board, const unsigned char* p, size_t size);
 };

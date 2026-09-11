@@ -6,6 +6,8 @@
 #include "IDisk.h"
 #include "Tape.h"
 #include "PPI.h"
+#include "DMA.h"
+#include "PlayCity.h"
 
 #include <cstring>
 
@@ -79,6 +81,20 @@ const unsigned int kChunkTape = 0x54415045;  // "TAPE"
 // sounds, and only visible when the state is loaded into a machine whose own
 // tape level happened to differ.
 const unsigned int kChunkPpi = 0x50504958;  // "PPIX"
+
+// The Plus ASIC's three sound DMA channels. The .SNA's CPC+ chunk carries three
+// of the nine fields each channel has -- the repeat counter, the repeat address
+// and the pause counter -- and not the state machine's current phase, the
+// instruction being executed, or the prescaler. A machine restored mid DMA
+// program therefore resumes somewhere else in it, which is most Plus software
+// with music.
+const unsigned int kChunkDma = 0x444D4158;  // "DMAX"
+
+// PlayCity: two YMZ294 sound chips and a Z84C30 CTC, none of which the .SNA has
+// ever heard of. It is a user-selectable option in the core, so a state taken
+// with it enabled has to carry it or savestates break for everyone who turns it
+// on.
+const unsigned int kChunkPlayCity = 0x50434954;  // "PCIT"
 
 
 void PutU16(std::vector<unsigned char>& out, unsigned short v)
@@ -983,6 +999,182 @@ bool MachineState::ReadPpi(Motherboard* board, const unsigned char* p, size_t si
    return true;
 }
 
+void MachineState::WriteDma(Motherboard* board, std::vector<unsigned char>& out)
+{
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkDma);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   PutU32(out, 3);
+   for (int i = 0; i < 3; ++i)
+   {
+      DMA* d = board->GetDMA(i);
+      PutU32(out, (unsigned int)d->dma_cycle_);
+      PutU32(out, (unsigned int)d->pause_counter_);
+      PutU32(out, (unsigned int)d->repeat_counter_);
+      PutU16(out, d->repeat_addr_);
+      PutU16(out, d->curent_instr_);
+      out.push_back(d->enable_next_ ? 1 : 0);
+      out.push_back(d->ppr_);
+      out.push_back(d->interrupt_on_ ? 1 : 0);
+      out.push_back(d->prescalar_);
+      out.push_back(d->prescalar_counter_);
+   }
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadDma(Motherboard* board, const unsigned char* p, size_t size)
+{
+   size_t at = 0;
+   if (size < 4) return false;
+   if (GetU32(&p[at]) != 3) return false;
+   at += 4;
+   if (size != at + 3 * 21) return false;
+
+   for (int i = 0; i < 3; ++i)
+   {
+      DMA* d = board->GetDMA(i);
+      d->dma_cycle_ = (decltype(d->dma_cycle_))GetU32(&p[at]); at += 4;
+      d->pause_counter_ = (int)GetU32(&p[at]); at += 4;
+      d->repeat_counter_ = (int)GetU32(&p[at]); at += 4;
+      d->repeat_addr_ = GetU16(&p[at]); at += 2;
+      d->curent_instr_ = GetU16(&p[at]); at += 2;
+      d->enable_next_ = p[at++] != 0;
+      d->ppr_ = p[at++];
+      d->interrupt_on_ = p[at++] != 0;
+      d->prescalar_ = p[at++];
+      d->prescalar_counter_ = p[at++];
+   }
+   return true;
+}
+
+void MachineState::WriteYmz(YMZ294* y, std::vector<unsigned char>& out)
+{
+   out.insert(out.end(), y->register_, y->register_ + 16);
+   out.push_back(y->register_address_);
+   PutU32(out, y->channel_a_freq_);   PutU32(out, y->channel_a_freq_counter_);
+   PutU32(out, y->channel_b_freq_);   PutU32(out, y->channel_b_freq_counter_);
+   PutU32(out, y->channel_c_freq_);   PutU32(out, y->channel_c_freq_counter_);
+   PutU32(out, y->noise_frequency_);
+   out.push_back(y->mixer_control_register_);
+   out.push_back(y->channel_a_volume_);
+   out.push_back(y->channel_b_volume_);
+   out.push_back(y->channel_c_volume_);
+   out.push_back(y->envelope_volume_);
+   PutU32(out, y->volume_enveloppe_frequency_);
+   out.push_back(y->volume_enveloppe_shape_);
+   out.push_back(y->up_ ? 1 : 0);
+   out.push_back(y->stop_ ? 1 : 0);
+   PutU32(out, y->counter_a_); PutU32(out, y->counter_b_); PutU32(out, y->counter_c_);
+   PutU32(out, y->counter_noise_); PutU32(out, y->counter_env_); PutU32(out, y->counter_state_env_);
+   out.push_back(y->channel_a_high_); out.push_back(y->channel_b_high_);
+   out.push_back(y->channel_c_high_); out.push_back(y->channel_noise_high_);
+   PutU32(out, y->noise_shift_register_);
+}
+
+void MachineState::ReadYmz(YMZ294* y, const unsigned char* p, size_t& at)
+{
+   memcpy(y->register_, &p[at], 16); at += 16;
+   y->register_address_ = p[at++];
+   y->channel_a_freq_ = GetU32(&p[at]); at += 4; y->channel_a_freq_counter_ = GetU32(&p[at]); at += 4;
+   y->channel_b_freq_ = GetU32(&p[at]); at += 4; y->channel_b_freq_counter_ = GetU32(&p[at]); at += 4;
+   y->channel_c_freq_ = GetU32(&p[at]); at += 4; y->channel_c_freq_counter_ = GetU32(&p[at]); at += 4;
+   y->noise_frequency_ = GetU32(&p[at]); at += 4;
+   y->mixer_control_register_ = p[at++];
+   y->channel_a_volume_ = p[at++]; y->channel_b_volume_ = p[at++]; y->channel_c_volume_ = p[at++];
+   y->envelope_volume_ = p[at++];
+   y->volume_enveloppe_frequency_ = GetU32(&p[at]); at += 4;
+   y->volume_enveloppe_shape_ = p[at++];
+   y->up_ = p[at++] != 0; y->stop_ = p[at++] != 0;
+   y->counter_a_ = GetU32(&p[at]); at += 4; y->counter_b_ = GetU32(&p[at]); at += 4;
+   y->counter_c_ = GetU32(&p[at]); at += 4; y->counter_noise_ = GetU32(&p[at]); at += 4;
+   y->counter_env_ = GetU32(&p[at]); at += 4; y->counter_state_env_ = GetU32(&p[at]); at += 4;
+   y->channel_a_high_ = p[at++]; y->channel_b_high_ = p[at++];
+   y->channel_c_high_ = p[at++]; y->channel_noise_high_ = p[at++];
+   y->noise_shift_register_ = GetU32(&p[at]); at += 4;
+}
+
+void MachineState::WritePlayCity(Motherboard* board, std::vector<unsigned char>& out)
+{
+   PlayCity* pc = board->GetPlayCity();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkPlayCity);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   out.push_back(pc->z84c30_.interrupt_vector_);
+   for (int i = 0; i < 4; ++i)
+   {
+      Z84C30::CTCCounter* ch = &pc->z84c30_.channel_[i];
+      out.push_back(ch->enabled_ ? 1 : 0);
+      out.push_back(ch->control_);
+      out.push_back(ch->time_constant_);
+      out.push_back(ch->down_counter_);
+      out.push_back(ch->prescaler_);
+      out.push_back(ch->decrement_ ? 1 : 0);
+      out.push_back(ch->wait_for_time_constraint_ ? 1 : 0);
+      out.push_back(ch->count_enabled_ ? 1 : 0);
+      out.push_back(ch->reload_ ? 1 : 0);
+   }
+   WriteYmz(&pc->ymz294_1_, out);
+   WriteYmz(&pc->ymz294_2_, out);
+
+   // PlayCity's own timing state, which is not in either chip. next_call_ymz_
+   // in particular is the field whose uninitialised value once made the whole
+   // expansion silent: leaving it out of a state would bring that back on every
+   // restore.
+   out.push_back(pc->trg0_update_ ? 1 : 0);
+   out.push_back(pc->drop_next_tick_ ? 1 : 0);
+   PutU32(out, (unsigned int)pc->next_call_ymz_);
+   out.push_back(pc->inner_line_.signal_up_ ? 1 : 0);
+   out.push_back(pc->inner_line_channel_23_.signal_up_ ? 1 : 0);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadPlayCity(Motherboard* board, const unsigned char* p, size_t size)
+{
+   PlayCity* pc = board->GetPlayCity();
+   size_t at = 0;
+   if (size < 1 + 4 * 9) return false;
+
+   pc->z84c30_.interrupt_vector_ = p[at++];
+   for (int i = 0; i < 4; ++i)
+   {
+      Z84C30::CTCCounter* ch = &pc->z84c30_.channel_[i];
+      ch->enabled_ = p[at++] != 0;
+      ch->control_ = p[at++];
+      ch->time_constant_ = p[at++];
+      ch->down_counter_ = p[at++];
+      ch->prescaler_ = p[at++];
+      ch->decrement_ = p[at++] != 0;
+      ch->wait_for_time_constraint_ = p[at++] != 0;
+      ch->count_enabled_ = p[at++] != 0;
+      ch->reload_ = p[at++] != 0;
+   }
+   ReadYmz(&pc->ymz294_1_, p, at);
+   ReadYmz(&pc->ymz294_2_, p, at);
+
+   pc->trg0_update_ = p[at++] != 0;
+   pc->drop_next_tick_ = p[at++] != 0;
+   pc->next_call_ymz_ = (int)GetU32(&p[at]); at += 4;
+   pc->inner_line_.signal_up_ = p[at++] != 0;
+   pc->inner_line_channel_23_.signal_up_ = p[at++] != 0;
+
+   return (at == size);
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -1007,6 +1199,8 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
    WriteCrtc(machine->GetMotherboard(), out);
    WriteTape(machine->GetMotherboard(), out);
    WritePpi(machine->GetMotherboard(), out);
+   WriteDma(machine->GetMotherboard(), out);
+   WritePlayCity(machine->GetMotherboard(), out);
 
    return true;
 }
@@ -1077,6 +1271,16 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
       else if (id == kChunkPpi)
       {
          if (!ReadPpi(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkDma)
+      {
+         if (!ReadDma(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkPlayCity)
+      {
+         if (!ReadPlayCity(machine->GetMotherboard(), &buffer[at], length))
             return false;
       }
       // Unknown chunks are skipped, so a state from a newer build still loads.

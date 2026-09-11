@@ -58,6 +58,7 @@ add_executable( unitTests
                      TestStateDeterminism.cpp
                      TestMachineState.cpp
                      TestMachineStateSize.cpp
+                     TestMachineStateExpansions.cpp
 
 )
 
