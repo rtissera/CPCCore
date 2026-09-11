@@ -607,8 +607,16 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
    EmulatorEngine* machine =
       NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "6128");
 
+   // If this ever refuses, the message has to say enough to tell a real
+   // incompatibility from a stale file: it failed once during development and
+   // the bare assertion said nothing useful.
+   ASSERT_GE(state.size(), 12u);
    ASSERT_TRUE(MachineState::Load(machine, &state[0], state.size()))
-      << "a state written by another process was refused";
+      << "a state written by another process was refused. " << state.size()
+      << " bytes, magic " << state[0] << state[1] << state[2] << state[3]
+      << ", version " << (state[4] | (state[5] << 8))
+      << " (this build writes " << MachineState::VERSION << ")"
+      << ", from " << state_path;
 
    for (int i = 0; i < kCrossProcessSlicesAfterSave; ++i)
       machine->RunTimeSlice();

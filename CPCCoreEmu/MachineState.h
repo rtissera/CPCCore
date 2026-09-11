@@ -33,7 +33,7 @@ class MachineState
 public:
    // Bumped when a chunk's payload changes shape. Loading refuses a version it
    // does not know rather than misreading it.
-   static const unsigned short VERSION = 1;
+   static constexpr unsigned short VERSION = 1;
 
    static bool Save(EmulatorEngine* machine, std::vector<unsigned char>& out);
    static bool Load(EmulatorEngine* machine, const unsigned char* buffer, size_t size);
