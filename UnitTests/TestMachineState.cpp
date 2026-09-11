@@ -636,12 +636,10 @@ TEST(MachineStateTest, RestoringAStateReproducesTheSameRunWithATapeRunning)
       "./res/Basil The Great Mouse Detective (UK) (1987) [Original] [TAPE].cdt";
    CheckOneMachine("464", 20, nullptr, "", kTape);
 
-   // Known residual, measured rather than assumed. Saving in the middle of a
-   // tape transfer leaves the CPU a few cycles from where it was: the raw object
-   // diff after four hundred slices shows the two runs identical everywhere --
-   // tape position, CRTC, PSG, FDC, RAM -- except the Z80's own registers, which
-   // are the loop counters of the firmware's tape-reading loop. Nothing is
-   // missing from the state; the restart point inside an instruction is not yet
-   // exact. Lower this when it is; it must never need raising.
-   CheckOneMachine("464", 137, nullptr, "", kTape, 3);
+   // Saving in the middle of a transfer used to leave three fields apart. The
+   // cause was the PPI's tape input level: the bit the firmware's loading loop
+   // samples, which the .SNA has no field for, so a restored machine read the
+   // wrong bit at the wrong moment and the loop took a different path while
+   // every other component stayed in step.
+   CheckOneMachine("464", 137, nullptr, "", kTape);
 }

@@ -5,6 +5,7 @@
 #include "DiskGen.h"
 #include "IDisk.h"
 #include "Tape.h"
+#include "PPI.h"
 
 #include <cstring>
 
@@ -69,6 +70,15 @@ const unsigned int kChunkCrtc = 0x43525443;  // "CRTC"
 // within it is state, and the size of the array is recorded so that a state can
 // be refused rather than applied to a different tape.
 const unsigned int kChunkTape = 0x54415045;  // "TAPE"
+
+// The PPI's tape input level. The .SNA carries the three ports and the control
+// word, but not the signal the tape is presenting to port B, which is the bit
+// the firmware's loading loop samples. Leave it behind and a restored machine
+// reads the wrong bit at the wrong moment, and the loop takes a different path
+// while every other component stays in step -- as confusing to diagnose as it
+// sounds, and only visible when the state is loaded into a machine whose own
+// tape level happened to differ.
+const unsigned int kChunkPpi = 0x50504958;  // "PPIX"
 
 
 void PutU16(std::vector<unsigned char>& out, unsigned short v)
@@ -945,6 +955,34 @@ bool MachineState::ReadTape(Motherboard* board, const unsigned char* p, size_t s
    return (at == size);
 }
 
+void MachineState::WritePpi(Motherboard* board, std::vector<unsigned char>& out)
+{
+   PPI8255* ppi = board->GetPPI();
+
+   const size_t length_at = out.size() + 4;
+   PutU32(out, kChunkPpi);
+   PutU32(out, 0);
+   const size_t payload_at = out.size();
+
+   out.push_back(ppi->tape_level_);
+   out.push_back(ppi->tape_write_data_level_ ? 1 : 0);
+
+   const unsigned int payload_size = (unsigned int)(out.size() - payload_at);
+   out[length_at + 0] = payload_size & 0xFF;
+   out[length_at + 1] = (payload_size >> 8) & 0xFF;
+   out[length_at + 2] = (payload_size >> 16) & 0xFF;
+   out[length_at + 3] = (payload_size >> 24) & 0xFF;
+}
+
+bool MachineState::ReadPpi(Motherboard* board, const unsigned char* p, size_t size)
+{
+   PPI8255* ppi = board->GetPPI();
+   if (size != 2) return false;
+   ppi->tape_level_ = p[0];
+   ppi->tape_write_data_level_ = p[1] != 0;
+   return true;
+}
+
 bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out)
 {
    if (machine == nullptr) return false;
@@ -968,6 +1006,7 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
    WriteDrives(machine->GetMotherboard(), out);
    WriteCrtc(machine->GetMotherboard(), out);
    WriteTape(machine->GetMotherboard(), out);
+   WritePpi(machine->GetMotherboard(), out);
 
    return true;
 }
@@ -1033,6 +1072,11 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
       else if (id == kChunkTape)
       {
          if (!ReadTape(machine->GetMotherboard(), &buffer[at], length))
+            return false;
+      }
+      else if (id == kChunkPpi)
+      {
+         if (!ReadPpi(machine->GetMotherboard(), &buffer[at], length))
             return false;
       }
       // Unknown chunks are skipped, so a state from a newer build still loads.

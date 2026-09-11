@@ -56,4 +56,6 @@ private:
    static bool ReadCrtc(Motherboard* board, const unsigned char* p, size_t size);
    static void WriteTape(Motherboard* board, std::vector<unsigned char>& out);
    static bool ReadTape(Motherboard* board, const unsigned char* p, size_t size);
+   static void WritePpi(Motherboard* board, std::vector<unsigned char>& out);
+   static bool ReadPpi(Motherboard* board, const unsigned char* p, size_t size);
 };

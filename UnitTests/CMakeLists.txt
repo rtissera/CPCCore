@@ -57,6 +57,7 @@ add_executable( unitTests
                      TestSnapshotMachineType.cpp
                      TestStateDeterminism.cpp
                      TestMachineState.cpp
+                     TestMachineStateSize.cpp
 
 )
 
