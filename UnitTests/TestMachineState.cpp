@@ -137,7 +137,8 @@ const int kSlicesAfterSave = 400;
 
 void CheckOneMachine(const char* section, int slices_before_save,
                     const char* disk = nullptr, const char* format = "",
-                    const char* tape = nullptr, int tolerated = 0)
+                    const char* tape = nullptr, int tolerated = 0,
+                    const char* run_command = nullptr)
 {
    DirectoriesImp dirImp; CDisplay display; Log log;
    SoundFactory soundFactory; ConfigurationManager conf_manager;
@@ -178,7 +179,7 @@ void CheckOneMachine(const char* section, int slices_before_save,
       ASSERT_EQ(0, machine->LoadDisk(disk, 0, false))
          << "the disk fixture did not load, so this case proves nothing: " << disk;
 
-      machine->Paste("cat\r");
+      machine->Paste(run_command != nullptr ? run_command : "cat\r");
 
       // Run until the drive is actually turning and stop there. The motor spins
       // down again once the access finishes, so waiting a fixed number of slices
@@ -192,6 +193,12 @@ void CheckOneMachine(const char* section, int slices_before_save,
       ASSERT_TRUE(spinning)
          << "the drive never started, so the FDC state under test is still idle";
       DrainTypist(machine);
+
+      // A loaded program needs time to start doing whatever it does; CAT does
+      // not, which is why the plain disk cases stop at the motor.
+      if (run_command != nullptr)
+         for (int i = 0; i < 600; ++i)
+            machine->RunTimeSlice(false);
    }
 
    const int kSlicesBeforeSave = slices_before_save;
@@ -642,4 +649,90 @@ TEST(MachineStateTest, RestoringAStateReproducesTheSameRunWithATapeRunning)
    // wrong bit at the wrong moment and the loop took a different path while
    // every other component stayed in step.
    CheckOneMachine("464", 137, nullptr, "", kTape);
+}
+
+// A Plus doing Plus things.
+//
+// Every other Plus case here sits at a BASIC prompt, where the ASIC, its three
+// DMA channels and the sprite hardware are all idle -- and a component that does
+// nothing during a test reads as perfectly carried whether it is or not. That
+// mistake has been made four times in this file's history. These run the ASIC
+// test programs off the disk the Plus.* tests use.
+TEST(MachineStateTest, RestoringAStateReproducesTheSameRunOnAPlusUsingTheAsic)
+{
+   const char* kAsicDisk = "./res/plus/asic.dsk";
+
+   struct Program { const char* command; const char* what; };
+   const Program programs[] = {
+      { "run\"dmatest\r",   "DMA sound channels" },
+      { "run\"asicrast\r", "raster interrupts"  },
+      { "run\"hscrl\r",     "hardware scroll"    },
+      { "run\"lumasic\r",   "ASIC palette"       },
+   };
+
+   for (size_t i = 0; i < sizeof(programs) / sizeof(programs[0]); ++i)
+   {
+      SCOPED_TRACE(programs[i].what);
+      CheckOneMachine("6128PLUSPARADOS", 137, kAsicDisk, programs[i].what,
+                      nullptr, 0, programs[i].command);
+   }
+}
+
+// A cartridge is media, like a disk or a tape: the state carries which bank the
+// machine is looking at, never the half-megabyte of ROM behind it.
+//
+// This runs a real Plus demo from a .cpr rather than sitting at a prompt, for
+// the same reason the ASIC cases exist -- a cartridge that is merely inserted
+// exercises nothing the base machine does not.
+TEST(MachineStateTest, RestoringAStateReproducesTheSameRunFromACartridge)
+{
+   const int kSlicesAfter = 400;
+   const char* kCart = "./res/CART/Eerie_Forest_(Logon_System_2017).cpr";
+
+   DirectoriesImp dirImp; CDisplay display; Log log;
+   SoundFactory soundFactory; ConfigurationManager conf_manager;
+   EmulatorEngine* machine =
+      NewBootedMachine(dirImp, display, log, soundFactory, conf_manager, "GX4000");
+
+   ASSERT_EQ(0, machine->LoadCpr(kCart))
+      << "the cartridge did not load, so this case proves nothing: " << kCart;
+   machine->Reinit();
+
+   // Let the demo get going: a cartridge that has only just been inserted is as
+   // idle as an empty machine.
+   for (int i = 0; i < 600; ++i)
+      machine->RunTimeSlice();
+
+   int ram_in_use = 0;
+   const unsigned char* ram = machine->GetMem()->GetRamBuffer();
+   for (int i = 0; i < 0x10000; ++i) if (ram[i] != 0) ++ram_in_use;
+   ASSERT_GT(ram_in_use, 0) << "the cartridge never ran";
+
+   std::vector<unsigned char> state;
+   ASSERT_TRUE(MachineState::Save(machine, state));
+
+   srand(0x5AFE5EED);
+   for (int i = 0; i < kSlicesAfter; ++i)
+      machine->RunTimeSlice();
+   const Fingerprint straight_through = Capture(machine);
+
+   ASSERT_TRUE(MachineState::Load(machine, &state[0], state.size()));
+   srand(0x5AFE5EED);
+   for (int i = 0; i < kSlicesAfter; ++i)
+      machine->RunTimeSlice();
+   const Fingerprint after_restore = Capture(machine);
+
+   delete machine;
+
+   int divergent = 0;
+   for (size_t i = 0; i < straight_through.fields.size(); ++i)
+   {
+      if (straight_through.fields[i].second == after_restore.fields[i].second) continue;
+      ++divergent;
+      fprintf(stderr, "  STILL DIVERGES: %s\n", straight_through.fields[i].first.c_str());
+   }
+   fprintf(stderr, "MACHINE STATE gx4000    cartridge  %d of %zu fields diverged\n",
+      divergent, straight_through.fields.size());
+
+   EXPECT_EQ(0, divergent) << "the state did not carry everything a cartridge run needs";
 }

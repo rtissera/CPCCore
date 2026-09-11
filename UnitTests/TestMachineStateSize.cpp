@@ -4,6 +4,7 @@
 #include "MachineState.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -46,13 +47,23 @@ unsigned int U32At(const std::vector<unsigned char>& b, size_t at)
 
 TEST(MachineStateSize, ReportsWhatAStateCosts)
 {
-   const char* sections[] = { "464", "6128", "6128PLUS" };
+   const char* sections[] = { "464", "6128", "6128PLUS", "GX4000" };
 
    for (size_t s = 0; s < sizeof(sections) / sizeof(sections[0]); ++s)
    {
       DirectoriesImp dirImp; CDisplay display; Log log;
       SoundFactory soundFactory; ConfigurationManager conf_manager;
       EmulatorEngine* machine = Boot(dirImp, display, log, soundFactory, conf_manager, sections[s]);
+
+      // On the cartridge machine, insert a 512 KB cartridge: the state must not
+      // grow by anything like that, because the ROM is media, not state.
+      if (strcmp(sections[s], "GX4000") == 0)
+      {
+         ASSERT_EQ(0, machine->LoadCpr("./res/CART/Eerie_Forest_(Logon_System_2017).cpr"));
+         machine->Reinit();
+         for (int i = 0; i < 300; ++i)
+            machine->RunTimeSlice();
+      }
 
       std::vector<unsigned char> state;
       ASSERT_TRUE(MachineState::Save(machine, state));
@@ -91,5 +102,11 @@ TEST(MachineStateSize, ReportsWhatAStateCosts)
 
       EXPECT_EQ(state.size(), 12 + sna_len + chunk_total)
          << "the chunk walk did not account for the whole state";
+
+      // The cartridge machine has half a megabyte of ROM plugged into it. If it
+      // ever shows up here, someone has started serialising media.
+      if (strcmp(sections[s], "GX4000") == 0)
+         EXPECT_LT(state.size(), 160u * 1024u)
+            << "the state grew with the cartridge, so the ROM is being carried";
    }
 }
