@@ -559,6 +559,14 @@ TEST(MachineStateTest, DISABLED_CrossProcessProducer)
    for (int i = 0; i < kCrossProcessSlicesBeforeSave; ++i)
       machine->RunTimeSlice();
 
+   // Assert in the child, where the message is unambiguous: a state written by a
+   // machine that never executed would load fine in the parent and fail the
+   // comparison for a reason that has nothing to do with the state format.
+   int ram_in_use = 0;
+   const unsigned char* ram = machine->GetMem()->GetRamBuffer();
+   for (int i = 0; i < 0x10000; ++i) if (ram[i] != 0) ++ram_in_use;
+   ASSERT_GT(ram_in_use, 0) << "the child machine never executed; no ROMs found";
+
    std::vector<unsigned char> state;
    ASSERT_TRUE(MachineState::Save(machine, state));
    ASSERT_TRUE(WriteWholeFile(state_path, state));
@@ -615,7 +623,7 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
       << "a state written by another process was refused. " << state.size()
       << " bytes, magic " << state[0] << state[1] << state[2] << state[3]
       << ", version " << (state[4] | (state[5] << 8))
-      << " (this build writes " << MachineState::VERSION << ")"
+      << " (this build writes " << MachineState::kVersion << ")"
       << ", from " << state_path;
 
    for (int i = 0; i < kCrossProcessSlicesAfterSave; ++i)

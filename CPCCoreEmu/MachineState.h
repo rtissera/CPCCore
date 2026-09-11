@@ -33,7 +33,11 @@ class MachineState
 public:
    // Bumped when a chunk's payload changes shape. Loading refuses a version it
    // does not know rather than misreading it.
-   static constexpr unsigned short VERSION = 1;
+   //
+   // Not named VERSION: that is a macro in the Windows SDK headers, which
+   // stdafx.h pulls in, and the expansion turns this line into a syntax error
+   // on MSVC only.
+   static constexpr unsigned short kVersion = 1;
 
    static bool Save(EmulatorEngine* machine, std::vector<unsigned char>& out);
    static bool Load(EmulatorEngine* machine, const unsigned char* buffer, size_t size);

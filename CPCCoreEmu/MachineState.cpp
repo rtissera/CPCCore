@@ -1185,7 +1185,7 @@ bool MachineState::Save(EmulatorEngine* machine, std::vector<unsigned char>& out
 
    out.clear();
    out.insert(out.end(), kMagic, kMagic + 4);
-   PutU16(out, VERSION);
+   PutU16(out, kVersion);
    PutU16(out, 0);
    PutU32(out, (unsigned int)sna.size());
    out.insert(out.end(), sna.begin(), sna.end());
@@ -1210,7 +1210,7 @@ bool MachineState::Load(EmulatorEngine* machine, const unsigned char* buffer, si
    if (machine == nullptr || buffer == nullptr) return false;
    if (size < kHeaderSize) return false;
    if (memcmp(buffer, kMagic, 4) != 0) return false;
-   if (GetU16(&buffer[4]) != VERSION) return false;
+   if (GetU16(&buffer[4]) != kVersion) return false;
 
    const unsigned int sna_size = GetU32(&buffer[8]);
    if (sna_size == 0 || kHeaderSize + sna_size > size) return false;
