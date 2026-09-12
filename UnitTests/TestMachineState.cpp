@@ -623,6 +623,16 @@ TEST(MachineStateTest, LoadsAStateWrittenByAnotherProcess)
       + " --gtest_also_run_disabled_tests"
       + " --gtest_filter=MachineStateTest.DISABLED_CrossProcessProducer"
       + " " + kStateOutFlag + "\"" + state_path + "\"";
+#ifdef _WIN32
+   // cmd.exe drops the outer pair of quotes from a command line that begins
+   // with one, which mangles a line that has more than one quoted part -- here
+   // the executable and the output path. Wrapping the whole thing in another
+   // pair is the documented way round it. Without this the child never runs and
+   // system() reports "The filename, directory name, or volume label syntax is
+   // incorrect", which looks exactly like an intermittent failure because it
+   // only happens on Windows.
+   command = "\"" + command + "\"";
+#endif
    ASSERT_EQ(0, system(command.c_str()))
       << "the child process failed; command was: " << command;
 
